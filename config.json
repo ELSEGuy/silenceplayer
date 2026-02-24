@@ -1,0 +1,13 @@
+{
+  "mp3_path": "C:/Users/Bob/Desktop/signal-2022-01-11-19-52-27-668.mp3",
+  "playlist_folder": "",
+  "silence_seconds": 5,
+  "max_volume": 50,
+  "fade_in_seconds": 1.0,
+  "mode": "single",
+  "single_loop_mode": "loop",
+  "playlist_loop_mode": "loop_song",
+  "excluded_apps": [],
+  "duck_percent": 20,
+  "fade_enabled": true
+}
