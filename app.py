@@ -7,12 +7,19 @@ import os
 import sys
 import glob
 
-import pygame
+# Always use bundled VLC libraries
+_vlc_dll = os.path.join(os.path.dirname(os.path.abspath(__file__)), "libvlc.dll")
+_vlc_plugins = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins")
+if hasattr(sys, '_MEIPASS'):
+    _vlc_dll = os.path.join(sys._MEIPASS, "libvlc.dll")
+    _vlc_plugins = os.path.join(sys._MEIPASS, "plugins")
+os.environ['PYTHON_VLC_LIB_PATH'] = _vlc_dll
+os.environ['PYTHON_VLC_MODULE_PATH'] = _vlc_plugins
+
+import vlc
 from pycaw.pycaw import AudioUtilities, IAudioMeterInformation
 import pystray
 from PIL import Image, ImageDraw
-
-os.environ["SDL_AUDIODRIVER"] = "directsound"
 
 if hasattr(sys, '_MEIPASS'):
     CONFIG_FILE = os.path.join(os.path.dirname(sys.executable), "config.json")
@@ -48,7 +55,9 @@ def save_config(cfg):
     with open(CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=2)
 
-OWN_PROCESSES = {"silenceplayer.exe"}
+OWN_PROCESSES = {"python.exe", "pythonw.exe", "py.exe", "python3.exe", "silenceplayer.exe"}
+
+SUPPORTED_EXTENSIONS = ("*.mp3", "*.opus", "*.m4a", "*.flac", "*.mp4")
 
 def get_playing_apps(excluded=None):
     playing = set()
@@ -141,7 +150,6 @@ class AudioMonitor:
 
                 if current_apps:
                     if duck_percent == 0:
-                        # Stop completely
                         ducked = False
                         unduck_start = None
                         self.app.stop_ambient()
@@ -150,20 +158,16 @@ class AudioMonitor:
                         self.app.set_status(f"External audio detected ({', '.join(current_apps)}) — ambient stopped.")
                     else:
                         if not ducked:
-                            # Duck the volume
                             ducked = True
                             unduck_start = None
-                            duck_vol = (duck_percent / 100.0) * (max_vol / 100.0)
+                            duck_vol = (duck_percent / 100.0) * max_vol
                             self.app.duck_ambient(duck_vol)
                             self.app.set_status(f"External audio detected — ambient ducked to {int(duck_percent)}%.")
                         else:
-                            # Still hearing external audio — reset unduck countdown
                             unduck_start = None
                             self.app.set_status(f"External audio detected — ambient ducked to {int(duck_percent)}%.")
-
                 else:
                     if ducked:
-                        # External audio stopped — start unduck countdown
                         if unduck_start is None:
                             unduck_start = now
                         elapsed = now - unduck_start
@@ -171,11 +175,9 @@ class AudioMonitor:
                         if remaining > 0:
                             self.app.set_status(f"Silence returned — fading back up in {remaining:.0f}s")
                         else:
-                            # Countdown done — fade back up
                             ducked = False
                             unduck_start = None
-                            target_vol = max_vol / 100.0
-                            self.app.unduck_ambient(target_vol)
+                            self.app.unduck_ambient(max_vol)
                             self.app.set_status("Playing ambient sound...")
                     else:
                         self.app.set_status("Playing ambient sound...")
@@ -203,144 +205,175 @@ class AmbientPlayer:
     def __init__(self, app):
         self.app = app
         self.playing = False
-        self.fade_thread = None
+        self.saved_pos = 0.0
         self.playlist = []
         self.playlist_index = 0
-        self.playlist_thread = None
-        self.saved_pos = 0.0
-        try:
-            pygame.mixer.init()
-        except Exception:
-            try:
-                pygame.mixer.pre_init(44100, -16, 2, 2048)
-                pygame.mixer.init()
-            except Exception as e:
-                print(f"Audio init error: {e}")
+        self._current_vol = 0
+        self._stop_event = threading.Event()
+
+        # VLC instance - quiet mode to suppress console output
+        self.vlc_instance = vlc.Instance("--quiet", "--no-video")
+        self.media_player = self.vlc_instance.media_player_new()
 
     def _get_fade_secs(self):
-        enabled = self.app.config.get("fade_enabled", True)
-        return 2.0 if enabled else 0.01
+        return 2.0 if self.app.config.get("fade_enabled", True) else 0.01
 
-    def play(self, config):
-        if self.playing:
-            return
-        self.playing = True
-        mode = config.get("mode", "single")
+    def _set_volume(self, vol_percent):
+        """Set volume. vol_percent is 0-100."""
+        vol = max(0, min(100, int(vol_percent)))
+        self._current_vol = vol
+        self.media_player.audio_set_volume(vol)
 
-        if mode == "single":
-            path = config.get("mp3_path", "")
-            loop_mode = config.get("single_loop_mode", "loop")
-            if not path or not os.path.exists(path):
-                self.app.set_status("No valid MP3 file selected!", error=True)
-                self.playing = False
-                return
-            self.fade_thread = threading.Thread(
-                target=self._play_single,
-                args=(path, config["max_volume"], loop_mode),
-                daemon=True
-            )
-            self.fade_thread.start()
-        else:
-            folder = config.get("playlist_folder", "")
-            if not folder or not os.path.isdir(folder):
-                self.app.set_status("No valid playlist folder selected!", error=True)
-                self.playing = False
-                return
-            files = sorted(glob.glob(os.path.join(folder, "*.mp3")))
-            if not files:
-                self.app.set_status("No MP3 files found in folder!", error=True)
-                self.playing = False
-                return
-            self.playlist = files
-            self.playlist_index = 0
-            loop_mode = config.get("playlist_loop_mode", "loop_playlist")
-            self.fade_thread = threading.Thread(
-                target=self._play_playlist,
-                args=(config["max_volume"], loop_mode),
-                daemon=True
-            )
-            self.fade_thread.start()
+    def _get_volume(self):
+        return self.media_player.audio_get_volume()
 
-    def _fade_in(self, max_vol):
+    def _is_playing(self):
+        return self.media_player.is_playing()
+
+    def _fade_in(self, target_vol):
         fade_secs = self._get_fade_secs()
         steps = 50
         step_time = fade_secs / steps
+        self._set_volume(0)
         for i in range(steps + 1):
-            if not self.playing:
+            if not self.playing or self._stop_event.is_set():
                 return False
-            pygame.mixer.music.set_volume((i / steps) * max_vol)
+            self._set_volume((i / steps) * target_vol)
             time.sleep(step_time)
         return True
 
     def _fade_out(self):
         fade_secs = self._get_fade_secs()
-        try:
-            current_vol = pygame.mixer.music.get_volume()
-            steps = 50
-            step_time = fade_secs / steps
-            for i in range(steps):
-                if not pygame.mixer.music.get_busy():
-                    break
-                pygame.mixer.music.set_volume(current_vol * (1 - (i / steps)))
-                time.sleep(step_time)
-            pygame.mixer.music.stop()
-        except Exception:
-            pass
+        steps = 50
+        step_time = fade_secs / steps
+        current = self._get_volume()
+        for i in range(steps):
+            if not self._is_playing():
+                break
+            self._set_volume(current * (1 - (i / steps)))
+            time.sleep(step_time)
+        self.media_player.stop()
 
     def duck(self, target_vol):
-        """Smoothly lower volume to target_vol."""
+        """Smoothly lower volume to target_vol (0-100)."""
         try:
-            current_vol = pygame.mixer.music.get_volume()
+            current = self._get_volume()
             steps = 20
             step_time = 0.05
             for i in range(steps + 1):
                 if not self.playing:
                     return
-                vol = current_vol + (target_vol - current_vol) * (i / steps)
-                pygame.mixer.music.set_volume(vol)
+                self._set_volume(current + (target_vol - current) * (i / steps))
                 time.sleep(step_time)
         except Exception:
             pass
 
     def unduck(self, target_vol):
-        """Smoothly raise volume back to target_vol."""
+        """Smoothly raise volume back to target_vol (0-100)."""
         try:
-            current_vol = pygame.mixer.music.get_volume()
+            current = self._get_volume()
             fade_secs = self._get_fade_secs()
             steps = 50
             step_time = fade_secs / steps
             for i in range(steps + 1):
                 if not self.playing:
                     return
-                vol = current_vol + (target_vol - current_vol) * (i / steps)
-                pygame.mixer.music.set_volume(vol)
+                self._set_volume(current + (target_vol - current) * (i / steps))
                 time.sleep(step_time)
         except Exception:
             pass
 
-    def _play_single(self, path, max_vol_percent, loop_mode):
+    def play(self, config):
+        if self.playing:
+            return
+        self.playing = True
+        self._stop_event.clear()
+        mode = config.get("mode", "single")
+
+        if mode == "single":
+            path = config.get("mp3_path", "")
+            loop_mode = config.get("single_loop_mode", "loop")
+            if not path or not os.path.exists(path):
+                self.app.set_status("No valid audio file selected!", error=True)
+                self.playing = False
+                return
+            threading.Thread(
+                target=self._play_single,
+                args=(path, config["max_volume"], loop_mode),
+                daemon=True
+            ).start()
+        else:
+            folder = config.get("playlist_folder", "")
+            if not folder or not os.path.isdir(folder):
+                self.app.set_status("No valid playlist folder selected!", error=True)
+                self.playing = False
+                return
+            files = []
+            for ext in SUPPORTED_EXTENSIONS:
+                files.extend(glob.glob(os.path.join(folder, ext)))
+            files = sorted(files)
+            if not files:
+                self.app.set_status("No supported audio files found in folder!", error=True)
+                self.playing = False
+                return
+            self.playlist = files
+            self.playlist_index = 0
+            loop_mode = config.get("playlist_loop_mode", "loop_playlist")
+            threading.Thread(
+                target=self._play_playlist,
+                args=(config["max_volume"], loop_mode),
+                daemon=True
+            ).start()
+
+    def _load_and_play(self, path, start_pos=0.0):
+        """Load a file into VLC and start playing from start_pos seconds."""
+        media = self.vlc_instance.media_new(path)
+        self.media_player.set_media(media)
+        self.media_player.play()
+        # Wait for VLC to start playing
+        for _ in range(20):
+            time.sleep(0.1)
+            if self.media_player.is_playing():
+                break
+        # Seek to saved position if needed
+        if start_pos > 0.5:
+            self.media_player.set_time(int(start_pos * 1000))
+
+    def _play_single(self, path, max_vol, loop_mode):
         try:
-            max_vol = max_vol_percent / 100.0
-            pygame.mixer.music.load(path)
-            pygame.mixer.music.set_volume(0.0)
-            loops = -1 if loop_mode == "loop" else 0
-            pygame.mixer.music.play(loops, start=self.saved_pos)
+            self._load_and_play(path, self.saved_pos)
             self.saved_pos = 0.0
+
             if not self._fade_in(max_vol):
                 return
-            if loop_mode == "stop":
-                while pygame.mixer.music.get_busy() and self.playing:
-                    time.sleep(0.2)
+
+            if loop_mode == "loop":
+                # Keep looping manually
+                while self.playing and not self._stop_event.is_set():
+                    if not self._is_playing():
+                        # Song ended — restart
+                        self._load_and_play(path, 0.0)
+                        self._set_volume(max_vol)
+                    time.sleep(0.3)
+            else:
+                # Stop mode — wait for song to end
+                while self.playing and not self._stop_event.is_set():
+                    if not self._is_playing():
+                        break
+                    time.sleep(0.3)
                 self.playing = False
+
         except Exception as e:
             self.app.set_status(f"Playback error: {e}", error=True)
             self.playing = False
 
-    def _play_playlist(self, max_vol_percent, loop_mode):
+    def _play_playlist(self, max_vol, loop_mode):
         try:
-            max_vol = max_vol_percent / 100.0
-            while self.playing:
+            first_song = True
+
+            while self.playing and not self._stop_event.is_set():
                 loop_mode = self.app.config["playlist_loop_mode"]
+
                 if self.playlist_index >= len(self.playlist):
                     if loop_mode == "loop_playlist":
                         self.playlist_index = 0
@@ -352,26 +385,28 @@ class AmbientPlayer:
                 song_name = os.path.basename(path)
                 self.app.set_status(f"Playing: {song_name}")
 
-                pygame.mixer.music.load(path)
-                pygame.mixer.music.set_volume(0.0)
-                pygame.mixer.music.play(0, start=self.saved_pos)
+                start = self.saved_pos if first_song else 0.0
+                self._load_and_play(path, start)
                 self.saved_pos = 0.0
+                first_song = False
 
                 if not self._fade_in(max_vol):
                     return
 
-                while pygame.mixer.music.get_busy() and self.playing:
-                    current_mode = self.app.config["playlist_loop_mode"]
-                    if current_mode == "loop_song":
-                        if not pygame.mixer.music.get_busy():
-                            pygame.mixer.music.play(0)
-                    time.sleep(0.2)
+                # Wait for song to finish
+                while self.playing and not self._stop_event.is_set():
+                    if not self._is_playing():
+                        break
+                    time.sleep(0.3)
 
-                if not self.playing:
+                if not self.playing or self._stop_event.is_set():
                     return
 
                 current_mode = self.app.config["playlist_loop_mode"]
                 if current_mode == "loop_song":
+                    # Restart same song
+                    self._load_and_play(path, 0.0)
+                    self._set_volume(max_vol)
                     continue
                 elif current_mode == "stop":
                     self.playing = False
@@ -387,14 +422,15 @@ class AmbientPlayer:
         if not self.playing:
             return
         try:
-            self.saved_pos = pygame.mixer.music.get_pos() / 1000.0
+            self.saved_pos = self.media_player.get_time() / 1000.0
         except Exception:
             self.saved_pos = 0.0
+        self._stop_event.set()
         self.playing = False
         try:
             self._fade_out()
         except Exception:
-            pass
+            self.media_player.stop()
 
 
 class App:
@@ -566,7 +602,7 @@ class App:
 
         # Single card
         single_card = tk.Frame(parent, bg=CARD, padx=16, pady=12)
-        label(single_card, "Ambient Sound File (MP3)", bold=True).grid(
+        label(single_card, "Ambient Sound File (MP3, OPUS, M4A, FLAC, MP4)", bold=True).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
         self.mp3_var = tk.StringVar(value=self.config["mp3_path"])
         entry(single_card, self.mp3_var, width=22).grid(row=1, column=0, sticky="w")
@@ -601,7 +637,7 @@ class App:
 
         # Playlist card
         playlist_card = tk.Frame(parent, bg=CARD, padx=16, pady=12)
-        label(playlist_card, "Ambient Sound Playlist (MP3 Folder)", bold=True).grid(
+        label(playlist_card, "Ambient Sound Playlist (Folder)", bold=True).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
         self.playlist_var = tk.StringVar(value=self.config.get("playlist_folder", ""))
         entry(playlist_card, self.playlist_var, width=22).grid(row=1, column=0, sticky="w")
@@ -649,7 +685,6 @@ class App:
         entry(shared_card, self.silence_var, width=12).grid(row=1, column=0, sticky="w", pady=(2, 8))
         entry(shared_card, self.vol_var, width=12).grid(row=1, column=1, sticky="w", padx=(20, 0), pady=(2, 8))
 
-        # Fade toggle
         fade_row = tk.Frame(shared_card, bg=CARD)
         fade_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
         label(fade_row, "Fade-in / Fade-out", bold=True, color=FG).pack(side="left", padx=(0, 12))
@@ -705,7 +740,6 @@ class App:
                  length=460, showvalue=False).pack(fill="x")
         on_duck_change(self.duck_var.get())
 
-        # Buttons
         btn_frame = tk.Frame(parent, bg=BG)
         btn_frame.pack(pady=6)
         self.start_btn = button(btn_frame, "Start Monitoring", self._toggle_monitoring, color="#a6e3a1")
@@ -794,15 +828,18 @@ class App:
 
     def _browse_mp3(self):
         path = filedialog.askopenfilename(
-            title="Select ambient MP3",
-            filetypes=[("MP3 files", "*.mp3"), ("All files", "*.*")]
+            title="Select ambient audio file",
+            filetypes=[
+                ("Audio files", "*.mp3 *.opus *.m4a *.flac *.mp4"),
+                ("All files", "*.*")
+            ]
         )
         if path:
             self.mp3_var.set(path)
             self.config["mp3_path"] = path
 
     def _browse_playlist(self):
-        folder = filedialog.askdirectory(title="Select folder with MP3 files")
+        folder = filedialog.askdirectory(title="Select folder with audio files")
         if folder:
             self.playlist_var.set(folder)
             self.config["playlist_folder"] = folder
@@ -850,7 +887,7 @@ class App:
                 return
             mode = self.config["mode"]
             if mode == "single" and not os.path.exists(self.config["mp3_path"]):
-                messagebox.showerror("No file", "Please select a valid MP3 file first.")
+                messagebox.showerror("No file", "Please select a valid audio file first.")
                 return
             if mode == "playlist" and not os.path.isdir(self.config["playlist_folder"]):
                 messagebox.showerror("No folder", "Please select a valid playlist folder first.")
