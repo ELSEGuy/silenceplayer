@@ -9,7 +9,6 @@ import glob
 import collections
 
 import numpy as np
-import pyaudiowpatch as pyaudio
 from proctap import ProcessAudioCapture
 from pycaw.pycaw import AudioUtilities, IAudioMeterInformation
 import pystray

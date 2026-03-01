@@ -25,6 +25,5 @@ You may not use this for commercial purposes without permission.
 ## Dependencies
 - [ProcTap](https://github.com/m96-chan/ProcTap) — per-process audio capture (MIT License)
 - [python-vlc](https://github.com/oaubert/python-vlc) — VLC audio engine
-- [pyaudiowpatch](https://github.com/s0d3s/PyAudioWPatch) — WASAPI loopback capture
 - [pycaw](https://github.com/AndreMiras/pycaw) — Windows audio session control
 - [pystray](https://github.com/moses-palmer/pystray) — system tray support
