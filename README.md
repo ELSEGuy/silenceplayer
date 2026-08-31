@@ -31,7 +31,8 @@
 - 💬 Experimental Discord Mirroring Fix
 - 🖥️ Runs quietly in the Windows system tray
 - 💾 Saves your settings automatically
-- 🎧 Supports MP3, OPUS, M4A, FLAC and MP4
+- 🎧 Supports MP3, M4A, FLAC and MP4
+- 🚧 OPUS support is a work in progress
 
 ## 💡 How it works
 
@@ -45,7 +46,7 @@ When another application begins playing audio again:
 
 **External audio detected → Silence Player fades, ducks or stops**
 
-This makes it useful for ambient music, rain sounds, white noise, room tone, focus audio, and anything else you want automatically playing during quiet moments.
+This makes it useful for ambient sound, rain sounds, white noise, room tone, focus audio, and anything else you want automatically playing during quiet moments.
 
 ## 📥 Download
 
@@ -55,13 +56,15 @@ If you use a packaged release, you do not need to install Python manually.
 
 ## 🎵 Supported formats
 
-| Format | Supported |
+| Format | Status |
 | --- | :---: |
-| MP3 | ✅ |
-| OPUS | ✅ |
-| M4A | ✅ |
-| FLAC | ✅ |
-| MP4 | ✅ |
+| MP3 | ✅ Supported |
+| M4A | ✅ Supported |
+| FLAC | ✅ Supported |
+| MP4 | ✅ Supported |
+| OPUS | 🚧 Work in progress |
+
+> OPUS support currently has known issues and is not considered fully supported yet.
 
 Playback is powered by VLC.
 
@@ -70,6 +73,8 @@ Playback is powered by VLC.
 Silence Player includes an **experimental Discord Mirroring Fix**.
 
 Discord can expose audio sessions used for screen sharing or audio capture even when they are not actually producing audible sound. Silence Player can use per-process audio monitoring to better distinguish real Discord audio from mirrored sessions.
+
+For now, this experimental fix only targets **Discord**. Broader support for common recording and streaming software is planned for a future version.
 
 > This feature is experimental and may not work perfectly on every setup.
 
@@ -86,6 +91,7 @@ A larger **2.0 update** is planned with a complete UX/UI redesign and refreshed 
 - [ ] Improved settings experience
 - [ ] Cleaner application architecture
 - [ ] Improved installation experience
+- [ ] Broader recording and streaming software support for mirroring detection
 - [ ] General usability improvements
 
 The current version will remain available while 2.0 is being developed.
@@ -111,4 +117,4 @@ Commercial use requires permission from the author.
 
 Created by **ELSEGuy**.
 
-Development was assisted by Claude AI by Anthropic.
+Development was assisted by a personal AI agent.
