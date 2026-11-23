@@ -62,9 +62,7 @@ If you use a packaged release, you do not need to install Python manually.
 | M4A | ✅ Supported |
 | FLAC | ✅ Supported |
 | MP4 | ✅ Supported |
-| OPUS | 🚧 Work in progress |
-
-> OPUS support currently has known issues and is not considered fully supported yet.
+| OPUS | ✅ Supported |
 
 Playback is powered by VLC.
 
