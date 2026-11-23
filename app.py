@@ -1,18 +1,39 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox
+import tkinter.font as tkfont
 import threading
 import time
 import json
 import os
 import sys
 import glob
+import bisect
 import collections
+import logging
+import queue
+import tempfile
+import copy
+from logging.handlers import RotatingFileHandler
+from typing import NamedTuple
 
 import numpy as np
-from proctap import ProcessAudioCapture
 from pycaw.pycaw import AudioUtilities, IAudioMeterInformation
 import pystray
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageTk
+
+APP_NAME    = "SilencePlayer"
+APP_VERSION = "1.3.0"
+
+log = logging.getLogger("silenceplayer")
+
+# ProcTap is only needed by the Mirroring Fix. If its
+# native extension can't load, the rest of the app must still work.
+try:
+    from proctap import ProcessAudioCapture
+    PROCTAP_IMPORT_ERROR = None
+except Exception as _e:  # ImportError, or OSError from the native .pyd
+    ProcessAudioCapture = None
+    PROCTAP_IMPORT_ERROR = _e
 
 # Always use bundled VLC libraries
 _vlc_dll = os.path.join(os.path.dirname(os.path.abspath(__file__)), "libvlc.dll")
@@ -30,6 +51,165 @@ if hasattr(sys, '_MEIPASS'):
 else:
     CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Logging
+# ─────────────────────────────────────────────────────────────────────────────
+
+LOG_MAX_BYTES    = 1_000_000
+LOG_BACKUP_COUNT = 3
+
+
+def log_dir():
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, APP_NAME)
+
+
+class _ThrottleFilter(logging.Filter):
+    """Lets the same message template through at most once per `interval` seconds.
+
+    Only applies to loggers under `prefix` (ProcTap), whose worker loops can
+    log the same error many times per second. Attached to handlers, because
+    logger-level filters don't see records from child loggers.
+    """
+
+    def __init__(self, prefix, interval=60.0):
+        super().__init__()
+        self.prefix = prefix
+        self.interval = interval
+        self._last = {}
+        self._lock = threading.Lock()
+
+    def filter(self, record):
+        if not (record.name == self.prefix or record.name.startswith(self.prefix + ".")):
+            return True
+        key = (record.name, record.levelno, record.msg)
+        now = time.monotonic()
+        with self._lock:
+            last = self._last.get(key)
+            if last is not None and now - last < self.interval:
+                return False
+            self._last[key] = now
+        return True
+
+
+_throttle_lock = threading.Lock()
+_throttle_last = {}
+
+
+def log_throttled(key, level, msg, *args, interval=60.0, **kwargs):
+    """Log at most once per `interval` seconds for a given key.
+
+    The monitor loop runs every 500 ms, so a persistent failure (for example
+    pycaw breaking) must not write two log lines per second forever.
+    """
+    now = time.monotonic()
+    with _throttle_lock:
+        last, suppressed = _throttle_last.get(key, (None, 0))
+        if last is not None and now - last < interval:
+            _throttle_last[key] = (last, suppressed + 1)
+            return
+        _throttle_last[key] = (now, 0)
+    if suppressed:
+        msg = msg + " (%d similar messages suppressed)"
+        args = args + (suppressed,)
+    log.log(level, msg, *args, **kwargs)
+
+
+def setup_logging():
+    """Configure a rotating log file. Never raises: logging must fail safely."""
+    if getattr(setup_logging, "_done", False):
+        return
+    setup_logging._done = True
+
+    logging.raiseExceptions = False   # a broken log file must never crash the app
+    log.setLevel(logging.DEBUG if os.environ.get("SILENCEPLAYER_DEBUG") else logging.INFO)
+    log.propagate = False
+    fmt = logging.Formatter("%(asctime)s %(levelname)-7s [%(threadName)s] %(message)s")
+
+    handlers = []
+    try:
+        d = log_dir()
+        os.makedirs(d, exist_ok=True)
+        fh = RotatingFileHandler(os.path.join(d, "silenceplayer.log"),
+                                 maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT,
+                                 encoding="utf-8", delay=True)
+        handlers.append(fh)
+    except Exception:
+        pass
+    if not hasattr(sys, "_MEIPASS"):
+        # Running from source: also keep a copy next to app.py for easy access.
+        try:
+            handlers.append(RotatingFileHandler(
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), "silenceplayer.log"),
+                maxBytes=LOG_MAX_BYTES, backupCount=1, encoding="utf-8", delay=True))
+        except Exception:
+            pass
+        if sys.stderr is not None:
+            handlers.append(logging.StreamHandler(sys.stderr))
+    if not handlers:
+        handlers.append(logging.NullHandler())
+
+    throttle = _ThrottleFilter("proctap", 60.0)
+    for h in handlers:
+        h.setFormatter(fmt)
+        h.addFilter(throttle)
+        log.addHandler(h)
+
+    # ProcTap logs through its own loggers; keep its warnings/errors, throttled.
+    pt_log = logging.getLogger("proctap")
+    pt_log.setLevel(logging.WARNING)
+    pt_log.propagate = False
+    for h in handlers:
+        pt_log.addHandler(h)
+
+
+def install_exception_hooks():
+    def _sys_hook(exc_type, exc, tb):
+        log.critical("Unhandled exception", exc_info=(exc_type, exc, tb))
+
+    def _thread_hook(args):
+        if args.exc_type is SystemExit:
+            return
+        name = args.thread.name if args.thread else "?"
+        log.critical("Unhandled exception in thread %s", name,
+                     exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+
+    sys.excepthook = _sys_hook
+    threading.excepthook = _thread_hook
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+SILENCE_MIN, SILENCE_MAX = 1, 3600
+VOLUME_MIN,  VOLUME_MAX  = 0, 100
+DUCK_MIN,    DUCK_MAX    = 0, 100
+
+VALID_MODES          = ("single", "playlist")
+VALID_SINGLE_LOOP    = ("loop", "stop")
+VALID_PLAYLIST_LOOP  = ("loop_song", "stop", "loop_playlist")
+
+# Apps on the Mirroring Fix list out of the box, grouped by the release that
+# added them. Existing configs get the newer groups added once (see
+# sanitize_config), so an app a user removed never comes back.
+MIRROR_DEFAULTS = [
+    # v1: first set
+    ["discord.exe",              # mirrors desktop audio while streaming
+     "signalrgb.exe",            # audio-reactive RGB lighting
+     "wallpaper64.exe",          # Wallpaper Engine (audio-reactive wallpapers)
+     "wallpaper32.exe"],
+    # v2: capture/recording software (GitHub issue #1) and audio visualizers
+    ["obs64.exe",                # OBS Studio
+     "streamlabs obs.exe",       # Streamlabs (older versions)
+     "streamlabs desktop.exe",   # Streamlabs Desktop
+     "medal.exe",                # Medal clip recorder
+     "rainmeter.exe",            # Rainmeter audio-visualizer skins
+     "icue.exe"],                # Corsair iCUE audio-reactive lighting
+]
+MIRROR_DEFAULTS_VERSION = len(MIRROR_DEFAULTS)
+
 DEFAULT_CONFIG = {
     "mp3_path": "",
     "playlist_folder": "",
@@ -41,75 +221,457 @@ DEFAULT_CONFIG = {
     "single_loop_mode": "loop",
     "playlist_loop_mode": "loop_playlist",
     "excluded_apps": [],
-    "discord_mirror_fix": False,
+    "mirror_fix_enabled": True,
+    "mirror_apps": [{"name": n, "enabled": True} for group in MIRROR_DEFAULTS for n in group],
+    "mirror_defaults_version": MIRROR_DEFAULTS_VERSION,
 }
 
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r") as f:
-                cfg = json.load(f)
-                for k, v in DEFAULT_CONFIG.items():
-                    cfg.setdefault(k, v)
-                return cfg
-        except Exception:
-            pass
-    return dict(DEFAULT_CONFIG)
 
-def save_config(cfg):
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(cfg, f, indent=2)
+class ValidationError(ValueError):
+    """A user-facing validation problem. str(e) is shown to the user."""
+
+
+def parse_int_field(text, label, lo, hi, unit=""):
+    """Parse a typed whole number and check its range, with a clear message."""
+    s = "" if text is None else str(text).strip()
+    suffix = f" {unit}" if unit else ""
+    rule = f"{label} must be a whole number between {lo} and {hi}{suffix}"
+    if not s:
+        raise ValidationError(f"{rule}. The field is empty.")
+    try:
+        value = int(s)
+    except ValueError:
+        raise ValidationError(f"{rule}. \"{s}\" is not a whole number.") from None
+    if not lo <= value <= hi:
+        raise ValidationError(f"{rule}. {value} is out of range.")
+    return value
+
+
+def display_name(path):
+    """What the Settings window shows for a file or folder: just its name.
+
+    'C:/Users/me/Music/asmr/Animal Crossing Office.m4a' → 'Animal Crossing Office.m4a'
+    'C:/Users/me/Music/asmr/'                          → 'asmr'
+    'D:/'                                              → 'D:/' (a drive has no name)
+    """
+    if not path:
+        return ""
+    name = os.path.basename(os.path.normpath(path))
+    return name or path
+
+
+def _coerce_int(value, lo, hi):
+    if isinstance(value, bool):
+        raise TypeError("bool is not a number")
+    if isinstance(value, float):
+        if not value.is_integer():
+            raise ValueError("not a whole number")
+        value = int(value)
+    elif isinstance(value, str):
+        value = int(value.strip())
+    elif not isinstance(value, int):
+        raise TypeError(type(value).__name__)
+    if not lo <= value <= hi:
+        raise ValueError(f"{value} out of range {lo}-{hi}")
+    return value
+
+
+def _coerce_bool(value):
+    if isinstance(value, bool):
+        return value
+    raise TypeError(type(value).__name__)
+
+
+def _coerce_str(value):
+    if isinstance(value, str):
+        return value
+    raise TypeError(type(value).__name__)
+
+
+def _coerce_choice(choices):
+    def check(value):
+        if value in choices:
+            return value
+        raise ValueError(f"{value!r} not in {choices}")
+    return check
+
+
+def normalize_app_name(text):
+    """'SignalRGB' → 'signalrgb.exe' (process names are matched lower-case)."""
+    name = (text or "").strip().strip("\"'").strip().lower()
+    if name and not name.endswith(".exe"):
+        name += ".exe"
+    return name
+
+
+def _coerce_mirror_apps(value):
+    if not isinstance(value, list):
+        raise TypeError(type(value).__name__)
+    out, seen = [], set()
+    for item in value:
+        if isinstance(item, str):
+            name, enabled = item, True
+        elif isinstance(item, dict) and isinstance(item.get("name"), str):
+            name, enabled = item["name"], item.get("enabled", True)
+            if not isinstance(enabled, bool):
+                enabled = True
+        else:
+            continue
+        name = normalize_app_name(name)
+        if name and name not in seen:
+            seen.add(name)
+            out.append({"name": name, "enabled": enabled})
+    return out
+
+
+def enabled_mirror_apps(cfg):
+    """Names of the apps the Mirroring Fix should check. Never raises."""
+    try:
+        return frozenset(a["name"] for a in _coerce_mirror_apps(cfg.get("mirror_apps", []))
+                         if a["enabled"])
+    except (TypeError, ValueError):
+        return frozenset()
+
+
+def _coerce_app_list(value):
+    if not isinstance(value, list):
+        raise TypeError(type(value).__name__)
+    out = []
+    for item in value:
+        if isinstance(item, str):
+            name = item.strip().lower()
+            if name and name not in out:
+                out.append(name)
+    return out
+
+
+_CONFIG_CHECKS = {
+    "mp3_path":           _coerce_str,
+    "playlist_folder":    _coerce_str,
+    "silence_seconds":    lambda v: _coerce_int(v, SILENCE_MIN, SILENCE_MAX),
+    "max_volume":         lambda v: _coerce_int(v, VOLUME_MIN, VOLUME_MAX),
+    "fade_enabled":       _coerce_bool,
+    "duck_percent":       lambda v: _coerce_int(v, DUCK_MIN, DUCK_MAX),
+    "mode":               _coerce_choice(VALID_MODES),
+    "single_loop_mode":   _coerce_choice(VALID_SINGLE_LOOP),
+    "playlist_loop_mode": _coerce_choice(VALID_PLAYLIST_LOOP),
+    "excluded_apps":      _coerce_app_list,
+    "mirror_fix_enabled": _coerce_bool,
+    "mirror_apps":        _coerce_mirror_apps,
+    "mirror_defaults_version": lambda v: _coerce_int(v, 0, 10_000),
+}
+
+
+def sanitize_config(raw):
+    """Return (config, problems). Invalid values fall back to defaults.
+
+    Unknown keys are kept so a config written by a newer version survives a
+    round trip through this one.
+    """
+    cfg = copy.deepcopy(DEFAULT_CONFIG)
+    problems = []
+    if not isinstance(raw, dict):
+        return cfg, ["config file does not contain a JSON object"]
+    for key, value in raw.items():
+        check = _CONFIG_CHECKS.get(key)
+        if check is None:
+            cfg[key] = value
+            continue
+        try:
+            cfg[key] = check(value)
+        except (TypeError, ValueError) as e:
+            problems.append(f"{key}={value!r} is invalid ({e}); using default {DEFAULT_CONFIG[key]!r}")
+
+    # Add Mirroring Fix defaults introduced since this config was written.
+    if "mirror_apps" in raw and isinstance(raw.get("mirror_apps"), list):
+        seen = raw.get("mirror_defaults_version", 1)
+        if not isinstance(seen, int) or isinstance(seen, bool):
+            seen = 1
+        names = {a["name"] for a in cfg["mirror_apps"]}
+        for group in MIRROR_DEFAULTS[max(0, seen):]:
+            for name in group:
+                if name not in names:
+                    cfg["mirror_apps"].append({"name": name, "enabled": True})
+                    names.add(name)
+    cfg["mirror_defaults_version"] = MIRROR_DEFAULTS_VERSION
+    return cfg, problems
+
+
+def load_config(path=None):
+    """Load and sanitize the config. Returns (config, user_notice_or_None)."""
+    path = path or CONFIG_FILE
+    if not os.path.exists(path):
+        log.info("No config file at %s; using defaults", path)
+        return sanitize_config({})[0], None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (ValueError, UnicodeDecodeError) as e:
+        # Keep the broken file instead of silently overwriting it on next save.
+        backup = f"{path}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
+        try:
+            os.replace(path, backup)
+            log.error("Config file %s is corrupt (%s); moved it to %s", path, e, backup)
+            notice = (f"Your settings file was unreadable and has been reset. "
+                      f"The old file was kept as {os.path.basename(backup)}.")
+        except OSError:
+            log.exception("Config file %s is corrupt and could not be backed up", path)
+            notice = "Your settings file was unreadable; default settings are being used."
+        return sanitize_config({})[0], notice
+    except OSError:
+        log.exception("Could not read config file %s", path)
+        return sanitize_config({})[0], "Your settings file could not be read; default settings are being used."
+
+    cfg, problems = sanitize_config(raw)
+    for p in problems:
+        log.warning("Config: %s", p)
+    notice = None
+    if problems:
+        notice = "Some saved settings were invalid and have been reset to their defaults."
+    return cfg, notice
+
+
+_save_lock = threading.Lock()
+
+
+def save_config(cfg, path=None):
+    """Atomically write the config: temp file in the same folder, then replace.
+
+    A crash mid-write leaves either the old file or the new one, never a
+    truncated mix. Returns True on success; failures are logged, not raised.
+    """
+    path = path or CONFIG_FILE
+    folder = os.path.dirname(os.path.abspath(path))
+    with _save_lock:
+        try:
+            data = json.dumps(dict(cfg), indent=2)
+            fd, tmp = tempfile.mkstemp(prefix=".config-", suffix=".tmp", dir=folder)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(data)
+                    f.flush()
+                    os.fsync(f.fileno())
+                # Antivirus/indexers can briefly lock the target on Windows.
+                for attempt in range(5):
+                    try:
+                        os.replace(tmp, path)
+                        break
+                    except PermissionError:
+                        if attempt == 4:
+                            raise
+                        time.sleep(0.05 * (attempt + 1))
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+            return True
+        except Exception:
+            log_throttled("save_config", logging.ERROR,
+                          "Could not save config to %s", path, exc_info=True)
+            return False
+
+
+class Settings(NamedTuple):
+    silence_secs: float
+    fade_secs: float
+    duck_percent: float
+    max_vol: float
+    excluded: list
+    mirror_fix: bool
+    mirror_apps: frozenset
+
+
+FADE_SECONDS    = 2.0
+NO_FADE_SECONDS = 0.01
+
+
+def fade_seconds(cfg):
+    return FADE_SECONDS if cfg.get("fade_enabled", True) is not False else NO_FADE_SECONDS
+
+
+def runtime_settings(cfg):
+    """Read the values worker threads need. Never raises on bad values."""
+    def num(key, lo, hi):
+        try:
+            v = float(cfg.get(key, DEFAULT_CONFIG[key]))
+        except (TypeError, ValueError):
+            return float(DEFAULT_CONFIG[key])
+        if v != v or not lo <= v <= hi:   # NaN or out of range
+            return float(DEFAULT_CONFIG[key])
+        return v
+
+    excluded = cfg.get("excluded_apps", [])
+    if not isinstance(excluded, list):
+        excluded = []
+    return Settings(
+        silence_secs=num("silence_seconds", SILENCE_MIN, SILENCE_MAX),
+        fade_secs=fade_seconds(cfg),
+        duck_percent=num("duck_percent", DUCK_MIN, DUCK_MAX),
+        max_vol=num("max_volume", VOLUME_MIN, VOLUME_MAX),
+        excluded=excluded,
+        mirror_fix=cfg.get("mirror_fix_enabled", True) is True,
+        mirror_apps=enabled_mirror_apps(cfg),
+    )
+
 
 OWN_PROCESSES = {"python.exe", "pythonw.exe", "py.exe", "python3.exe", "silenceplayer.exe"}
 SUPPORTED_EXTENSIONS = ("*.mp3", "*.opus", "*.m4a", "*.flac", "*.mp4")
-FINGERPRINT_APPS = {"discord.exe"}
+SUPPORTED_LABEL = "MP3, OPUS, M4A, FLAC, MP4"
+# How long after the ambient sound starts a *new* "external" sound counts as
+# suspicious (an app reacting to our own sound), on top of the start cooldown.
+MIRROR_SUSPECT_SECONDS = 6.0
+
+
+def collect_playlist(folder):
+    files = []
+    for ext in SUPPORTED_EXTENSIONS:
+        files.extend(glob.glob(os.path.join(folder, ext)))
+    # dict.fromkeys de-duplicates while keeping order (glob can be case-insensitive)
+    return sorted(dict.fromkeys(f for f in files if os.path.isfile(f)))
+
+
+def validate_ambient_source(cfg):
+    """Return None if the selected ambient source is playable, else a message."""
+    mode = cfg.get("mode", "single")
+    if mode == "playlist":
+        folder = cfg.get("playlist_folder", "")
+        if not folder:
+            return "Please choose a playlist folder first."
+        if not os.path.isdir(folder):
+            return f"The playlist folder could not be found:\n{folder}"
+        if not collect_playlist(folder):
+            return f"The playlist folder doesn't contain any supported audio files ({SUPPORTED_LABEL})."
+        return None
+    path = cfg.get("mp3_path", "")
+    if not path:
+        return "Please choose an ambient sound file first."
+    if os.path.isdir(path):
+        return "The selected path is a folder. Use Playlist mode to play a folder."
+    if not os.path.isfile(path):
+        return f"The ambient sound file could not be found:\n{path}"
+    return None
+
+
+def same_path(a, b):
+    if not a or not b:
+        return False
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Resume state
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ResumeState(NamedTuple):
+    mode: str        # "single" or "playlist"
+    source: str      # the file (single) or folder (playlist) that was selected
+    path: str        # the file that was actually playing
+    index: int       # playlist index of `path` (0 in single mode)
+    position: float  # seconds into `path`
+
+
+def plan_single_start(path, resume):
+    """Seconds to start `path` at. Only resume if it is the same file."""
+    if resume is not None and resume.mode == "single" and same_path(resume.path, path):
+        return max(0.0, float(resume.position))
+    return 0.0
+
+
+def plan_playlist_start(folder, files, resume):
+    """Return (index, seconds) to start a playlist at.
+
+    - Same folder and the saved track still exists → that track at the saved time.
+    - Same folder but the saved track is gone → the track that now sits in its
+      place in sort order, from the beginning (never someone else's timestamp).
+    - Different folder, other mode, or nothing saved → first track.
+    """
+    if not files:
+        return 0, 0.0
+    if resume is None or resume.mode != "playlist" or not same_path(resume.source, folder):
+        return 0, 0.0
+    for i, f in enumerate(files):
+        if same_path(f, resume.path):
+            return i, max(0.0, float(resume.position))
+    if resume.path:
+        i = bisect.bisect_left(files, resume.path)
+    else:
+        i = resume.index
+    if not 0 <= i < len(files):
+        i = 0
+    return i, 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Windows audio sessions
+# ─────────────────────────────────────────────────────────────────────────────
 
 def get_playing_apps(excluded=None):
+    """Names of processes currently producing audio.
+
+    Raises if the session list itself can't be read: the monitor must not
+    mistake "pycaw is broken" for "the PC is silent" and start playing over
+    whatever is actually going on.
+    """
     playing = set()
     excluded_set = set(e.lower() for e in (excluded or []))
-    try:
-        sessions = AudioUtilities.GetAllSessions()
-        for session in sessions:
-            if session.Process:
-                name = session.Process.name().lower()
-                if name in OWN_PROCESSES:
-                    continue
-                if name in excluded_set:
-                    continue
-                try:
-                    meter = session._ctl.QueryInterface(IAudioMeterInformation)
-                    peak = meter.GetPeakValue()
-                    if peak > 0.001:
-                        playing.add(name)
-                except Exception:
-                    pass
-    except Exception:
-        pass
+    own_pid = os.getpid()
+    sessions = AudioUtilities.GetAllSessions()
+    for session in sessions:
+        try:
+            proc = session.Process
+            if not proc:
+                continue
+            # Our own VLC output, whatever the interpreter/EXE is called
+            # (e.g. pythonw3.12.exe from the Microsoft Store Python).
+            if proc.pid == own_pid:
+                continue
+            name = proc.name().lower()
+            if name in OWN_PROCESSES or name in excluded_set:
+                continue
+            meter = session._ctl.QueryInterface(IAudioMeterInformation)
+            peak = meter.GetPeakValue()
+            if peak > 0.001:
+                playing.add(name)
+        except Exception as e:
+            # Processes exit between listing and querying; that's normal.
+            log_throttled("session_query", logging.DEBUG,
+                          "Skipping an audio session: %s", e, interval=300)
     return playing
 
-def get_all_discord_pids():
-    """Returns all unique PIDs associated with discord.exe audio sessions."""
-    pids = set()
-    try:
-        sessions = AudioUtilities.GetAllSessions()
-        for session in sessions:
-            if session.Process:
-                if session.Process.name().lower() == "discord.exe":
-                    pids.add(session.Process.pid)
-    except Exception:
-        pass
-    return pids
+
+def get_app_pids(names):
+    """{pid: process name} for every audio session owned by one of `names`.
+
+    Raises on failure so the caller can keep its existing taps instead of
+    treating a transient pycaw error as "the app went away".
+    """
+    found = {}
+    for session in AudioUtilities.GetAllSessions():
+        try:
+            proc = session.Process
+            if proc:
+                name = proc.name().lower()
+                if name in names:
+                    found[proc.pid] = name
+        except Exception:
+            continue
+    return found
+
 
 def resource_path(filename):
     if hasattr(sys, '_MEIPASS'):
         return os.path.join(sys._MEIPASS, filename)
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
 
+
 def create_tray_icon():
     try:
         img = Image.open(resource_path("trayicon.png")).resize((64, 64))
         return img
     except Exception:
+        log.warning("Could not load trayicon.png; using the built-in icon", exc_info=True)
         img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
         draw.ellipse([0, 0, 63, 63], fill="#1e1e2e")
@@ -121,503 +683,1538 @@ def create_tray_icon():
         return img
 
 
-class DiscordMirrorFix:
+# ─────────────────────────────────────────────────────────────────────────────
+# Single instance (Windows named mutex)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SingleInstance:
+    """Allows one Silence Player per Windows login session.
+
+    Uses a named kernel mutex: Windows destroys it automatically when the
+    owning process exits or crashes, so there is no stale lock to clean up.
+    A second launch signals a named event, which makes the running instance
+    open its Settings window, and then exits.
     """
-    Monitors ALL Discord audio sessions via ProcTap.
 
-    Discord uses multiple PIDs:
-      - One for voice output (incoming voice from other users)
-      - One for UI sounds (notifications, join/leave sounds)
-      - One for capture/streaming (mirrors desktop audio — outputs nothing)
+    MUTEX_NAME = "Local\\SilencePlayer.SingleInstance"
+    EVENT_NAME = "Local\\SilencePlayer.ShowSettings"
+    ERROR_ALREADY_EXISTS = 183
+    ERROR_ACCESS_DENIED  = 5
+    WAIT_OBJECT_0        = 0
 
-    ProcTap sees 0 RMS on the capture session because it never renders audio.
-    By monitoring all Discord PIDs simultaneously, if ANY has RMS > 0
-    then Discord is playing real audio. If ALL are 0 → mirroring only → ignore.
+    def __init__(self):
+        self._k32 = None
+        self._mutex = None
+        self._event = None
+        self._stop = threading.Event()
+        self._listener = None
+
+    def _kernel32(self):
+        if self._k32 is None:
+            import ctypes
+            from ctypes import wintypes
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            k32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+            k32.CreateMutexW.restype = wintypes.HANDLE
+            k32.CreateEventW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR]
+            k32.CreateEventW.restype = wintypes.HANDLE
+            k32.SetEvent.argtypes = [wintypes.HANDLE]
+            k32.SetEvent.restype = wintypes.BOOL
+            k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            k32.WaitForSingleObject.restype = wintypes.DWORD
+            k32.CloseHandle.argtypes = [wintypes.HANDLE]
+            k32.CloseHandle.restype = wintypes.BOOL
+            self._ctypes = ctypes
+            self._k32 = k32
+        return self._k32
+
+    def acquire(self):
+        """True if this process is the only instance (or the check isn't possible)."""
+        if sys.platform != "win32":
+            return True
+        try:
+            k32 = self._kernel32()
+            handle = k32.CreateMutexW(None, False, self.MUTEX_NAME)
+            err = self._ctypes.get_last_error()
+            if not handle:
+                if err == self.ERROR_ACCESS_DENIED:
+                    # Exists, created by an instance running with other rights.
+                    self._signal_existing()
+                    return False
+                log.error("CreateMutexW failed (error %s); continuing without "
+                          "single-instance protection", err)
+                return True
+            if err == self.ERROR_ALREADY_EXISTS:
+                k32.CloseHandle(handle)
+                self._signal_existing()
+                return False
+            self._mutex = handle
+            self._event = k32.CreateEventW(None, False, False, self.EVENT_NAME)
+            if not self._event:
+                log.warning("CreateEventW failed (error %s); a second launch won't "
+                            "be able to open Settings", self._ctypes.get_last_error())
+            return True
+        except Exception:
+            log.exception("Single-instance check failed; continuing")
+            return True
+
+    def _signal_existing(self):
+        try:
+            k32 = self._kernel32()
+            ev = k32.CreateEventW(None, False, False, self.EVENT_NAME)
+            if ev:
+                k32.SetEvent(ev)
+                k32.CloseHandle(ev)
+        except Exception:
+            log.exception("Could not signal the running instance")
+
+    def listen(self, on_show_requested):
+        """Call `on_show_requested()` (from a worker thread) when a second launch happens."""
+        if not self._event:
+            return
+        def loop():
+            k32 = self._k32
+            while not self._stop.is_set():
+                try:
+                    if k32.WaitForSingleObject(self._event, 500) == self.WAIT_OBJECT_0:
+                        if not self._stop.is_set():
+                            on_show_requested()
+                except Exception:
+                    log.exception("Single-instance listener failed")
+                    return
+        self._listener = threading.Thread(target=loop, daemon=True, name="InstanceListener")
+        self._listener.start()
+
+    def release(self):
+        self._stop.set()
+        if self._listener is not None and self._listener is not threading.current_thread():
+            self._listener.join(timeout=2.0)
+        k32 = self._k32
+        if k32 is None:
+            return
+        for attr in ("_event", "_mutex"):
+            h = getattr(self, attr)
+            if h:
+                try:
+                    k32.CloseHandle(h)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mirroring Fix
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _MirrorTap:
+    """Per-PID capture state. Removing the object removes all of it at once."""
+
+    __slots__ = ("pid", "name", "tap", "samples", "started_at", "last_sample_time")
+
+    def __init__(self, pid, name, started_at, window):
+        self.pid = pid
+        self.name = name
+        self.tap = None
+        self.samples = collections.deque(maxlen=window)   # (time, rms)
+        self.started_at = started_at
+        self.last_sample_time = None
+
+
+class MirrorFix:
+    """
+    Some apps listen to everything the PC plays and show a fake level in the
+    Windows mixer while doing it, without making any sound themselves:
+
+      - Discord while streaming/screen sharing (its capture session mirrors
+        desktop audio; its voice/UI sessions are real output)
+      - SignalRGB, Wallpaper Engine and other audio-reactive apps
+
+    pycaw then reports them as "playing" the moment our ambient sound starts.
+
+    For every app in the list, each of its audio PIDs is tapped with ProcTap,
+    which captures what that process really renders. If ANY of an app's PIDs
+    has RMS > 0, the app is making real sound. If ALL are silent, the level in
+    the mixer is only mirroring → ignore it.
+
+    pycaw decides that an app is active; this class only answers whether that
+    activity is real output. When it can't tell (no tap yet, a tap failed, a
+    tap is still warming up) it answers True, i.e. the app counts as playing.
     """
 
     REAL_AUDIO_THRESHOLD = 0.001
     WINDOW_SIZE          = 10
+    MIN_SAMPLES          = 3      # samples needed to judge a tap during warm-up
+    WARMUP_SECONDS       = 2.0    # a new tap counts as "unknown" (→ real) at most this long
+    STALE_AFTER_SECONDS  = 2.0    # PCM older than this is not current audio
+    WATCH_INTERVAL       = 1.0
+    RETRY_BASE_SECONDS   = 5.0
+    RETRY_MAX_SECONDS    = 60.0
 
-    def __init__(self):
+    def __init__(self, apps_source, pid_source=None, capture_factory=None, clock=time.monotonic):
         self._lock        = threading.Lock()
-        self._running     = False
-        self._taps        = {}   # pid → ProcessAudioCapture
-        self._rms_buffers = {}   # pid → deque of recent RMS values
+        self._stop_event  = threading.Event()
+        self._started     = False
+        self._taps        = {}   # pid → _MirrorTap
+        self._failed      = {}   # pid → (next_retry_time, failure_count, name)
         self._watch_thread = None
+        self._apps_source = apps_source            # () → names to watch
+        self._pid_source  = pid_source or get_app_pids
+        self._capture_factory = capture_factory or ProcessAudioCapture
+        self._clock       = clock
+        self._last_verdict = {}
 
     def start(self):
-        self._running = True
+        with self._lock:
+            if self._started:
+                return
+            self._started = True
+        log.info("Mirroring Fix started")
         self._watch_thread = threading.Thread(
-            target=self._watch_loop, daemon=True)
+            target=self._watch_loop, daemon=True, name="MirrorWatch")
         self._watch_thread.start()
 
-    def stop(self):
-        self._running = False
+    def stop(self, timeout=3.0):
+        self._stop_event.set()
+        thread = self._watch_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout)
+            if thread.is_alive():
+                log.warning("Mirror watch thread did not exit within %.1fs", timeout)
         with self._lock:
-            taps = dict(self._taps)
+            states = list(self._taps.values())
             self._taps.clear()
-            self._rms_buffers.clear()
-        for pid, tap in taps.items():
-            try:
-                tap.stop()
-            except Exception:
-                pass
+            self._failed.clear()
+        for st in states:
+            self._stop_tap(st)
+        log.info("Mirroring Fix stopped")
 
-    def _make_callback(self, pid):
+    @staticmethod
+    def _stop_tap(state):
+        if state.tap is None:
+            return
+        try:
+            state.tap.stop()
+        except Exception:
+            log.warning("Stopping ProcTap for %s (PID %s) failed", state.name, state.pid,
+                        exc_info=True)
+
+    def _make_callback(self, state):
         def on_data(pcm, frames):
             try:
-                samples = np.frombuffer(pcm, dtype=np.float32)
-                rms = float(np.sqrt(np.mean(samples ** 2)))
+                n = len(pcm) // 4
+                if n == 0:
+                    return
+                # ProcTap on Windows delivers 48 kHz stereo float32.
+                samples = np.frombuffer(pcm, dtype=np.float32, count=n)
+                rms = float(np.sqrt(np.mean(np.square(samples, dtype=np.float64))))
+                if not np.isfinite(rms):
+                    return
+                now = self._clock()
                 with self._lock:
-                    if pid in self._rms_buffers:
-                        self._rms_buffers[pid].append(rms)
+                    # Only record data for the tap that is currently registered.
+                    if self._taps.get(state.pid) is state:
+                        state.samples.append((now, rms))
+                        state.last_sample_time = now
             except Exception:
-                pass
+                log_throttled(("mirror_cb", state.pid), logging.WARNING,
+                              "PCM callback failed for %s (PID %s)", state.name, state.pid,
+                              exc_info=True)
         return on_data
 
     def _watch_loop(self):
-        while self._running:
+        while not self._stop_event.is_set():
             try:
-                current_pids = get_all_discord_pids()
-
-                with self._lock:
-                    existing_pids = set(self._taps.keys())
-
-                # Start taps for new PIDs
-                for pid in current_pids - existing_pids:
-                    try:
-                        tap = ProcessAudioCapture(pid)
-                        tap.set_callback(self._make_callback(pid))
-                        tap.start()
-                        with self._lock:
-                            self._taps[pid] = tap
-                            self._rms_buffers[pid] = collections.deque(
-                                maxlen=self.WINDOW_SIZE)
-                    except Exception:
-                        pass
-
-                # Stop taps for PIDs that disappeared
-                for pid in existing_pids - current_pids:
-                    with self._lock:
-                        tap = self._taps.pop(pid, None)
-                        self._rms_buffers.pop(pid, None)
-                    if tap:
-                        try:
-                            tap.stop()
-                        except Exception:
-                            pass
-
+                self._sync_taps()
             except Exception:
-                pass
+                log_throttled("mirror_watch", logging.WARNING,
+                              "Mirror watch cycle failed", exc_info=True)
+            self._stop_event.wait(self.WATCH_INTERVAL)
 
-            time.sleep(1.0)
+    def _sync_taps(self):
+        names = frozenset(self._apps_source())
+        current = dict(self._pid_source(names)) if names else {}
+        now = self._clock()
 
-    def is_real_discord_audio(self):
-        """
-        True  → at least one Discord session is outputting real audio → react
-        False → all Discord sessions silent → mirroring only → ignore
-        """
         with self._lock:
-            if not self._rms_buffers:
-                return True  # No Discord sessions found → safe default
-            for pid, buf in self._rms_buffers.items():
-                if len(buf) < 3:
+            removed = []
+            for pid in list(self._taps):
+                st = self._taps[pid]
+                if current.get(pid) != st.name:
+                    removed.append(self._taps.pop(pid))     # gone, or removed from the list
+                elif st.tap is not None and getattr(st.tap, "is_running", True) is False:
+                    log.warning("ProcTap for %s (PID %s) stopped running; reopening",
+                                st.name, pid)
+                    removed.append(self._taps.pop(pid))
+            for pid in list(self._failed):
+                if current.get(pid) != self._failed[pid][2]:
+                    del self._failed[pid]
+            to_open = []
+            for pid, name in current.items():
+                if pid in self._taps:
                     continue
-                avg = float(np.mean(list(buf)))
-                if avg > self.REAL_AUDIO_THRESHOLD:
-                    return True
-        return False
+                failed = self._failed.get(pid)
+                if failed is not None and now < failed[0]:
+                    continue
+                to_open.append((pid, name))
+
+        for st in removed:
+            self._stop_tap(st)
+        for pid, name in to_open:
+            if self._stop_event.is_set():
+                break
+            self._open_tap(pid, name)
+
+    def _open_tap(self, pid, name):
+        state = _MirrorTap(pid, name, self._clock(), self.WINDOW_SIZE)
+        tap = None
+        try:
+            if self._capture_factory is None:
+                raise RuntimeError(f"ProcTap is unavailable: {PROCTAP_IMPORT_ERROR}")
+            tap = self._capture_factory(pid)
+            tap.set_callback(self._make_callback(state))
+            tap.start()
+        except Exception as e:
+            with self._lock:
+                count = self._failed.get(pid, (0, 0, name))[1] + 1
+                delay = min(self.RETRY_MAX_SECONDS, self.RETRY_BASE_SECONDS * (2 ** (count - 1)))
+                self._failed[pid] = (self._clock() + delay, count, name)
+            if count == 1:
+                log.warning("Could not open ProcTap for %s (PID %s): %s", name, pid, e,
+                            exc_info=True)
+            else:
+                log_throttled(("mirror_open", pid), logging.WARNING,
+                              "Still can't open ProcTap for %s (PID %s, attempt %d): %s",
+                              name, pid, count, e)
+            if tap is not None:
+                try:
+                    tap.stop()
+                except Exception:
+                    pass
+            return
+
+        state.tap = tap
+        state.started_at = self._clock()
+        with self._lock:
+            stopped = self._stop_event.is_set()
+            if not stopped:
+                self._taps[pid] = state
+                self._failed.pop(pid, None)
+        if stopped:
+            # stop() ran while this tap was opening; don't leave it orphaned.
+            self._stop_tap(state)
+        else:
+            log.info("Tapping %s (PID %s)", name, pid)
+
+    def _classify(self, state, now):
+        """'active', 'silent', or 'warming_up' for one tap."""
+        fresh = [rms for (t, rms) in state.samples if now - t <= self.STALE_AFTER_SECONDS]
+        warming_up = now - state.started_at < self.WARMUP_SECONDS
+        if warming_up and len(fresh) < self.MIN_SAMPLES:
+            if any(r > self.REAL_AUDIO_THRESHOLD for r in fresh):
+                return "active"
+            return "warming_up"
+        if not fresh:
+            # Nothing rendered recently (or the stream went quiet): not current audio.
+            return "silent"
+        return "active" if float(np.mean(fresh)) > self.REAL_AUDIO_THRESHOLD else "silent"
+
+    def is_real_audio(self, name):
+        """
+        True  → `name` is outputting real audio, or we can't tell yet → react
+        False → all of its sessions are silent → mirroring only → ignore
+        """
+        now = self._clock()
+        with self._lock:
+            taps = [st for st in self._taps.values() if st.name == name]
+            failed = any(f[2] == name for f in self._failed.values())
+            if not taps:
+                verdict, why = True, "not tapped (yet)"        # safe default
+            elif failed:
+                verdict, why = True, "a tap could not be opened"
+            else:
+                verdict, why = False, "all taps silent"
+                for st in taps:
+                    c = self._classify(st, now)
+                    if c != "silent":
+                        verdict, why = True, f"PID {st.pid} {c}"
+                        break
+        if verdict != self._last_verdict.get(name):
+            self._last_verdict[name] = verdict
+            log.info("%s classified as %s (%s)", name,
+                     "real audio" if verdict else "mirroring only", why)
+        return verdict
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Audio monitor
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _MonitorState:
+    def __init__(self):
+        self.silence_start     = None
+        self.ambient_triggered = False
+        self.cooldown_until    = 0.0
+        self.ducked            = False
+        self.unduck_start      = None
+        self.ambient_started_at = 0.0
 
 
 class AudioMonitor:
-    def __init__(self, app):
+    """Watches system audio and starts/stops/ducks the ambient player.
+
+    Every worker thread gets its own stop Event. A stopped worker can never be
+    revived by a later start(), and a new worker waits for the previous one
+    to exit before doing anything, so there is never more than one active.
+    """
+
+    POLL_INTERVAL      = 0.5
+    PREVIOUS_JOIN_SECS = 5.0
+
+    def __init__(self, app, playing_apps_source=None, clock=time.time):
         self.app = app
-        self.running = False
-        self.thread = None
+        self._lock = threading.Lock()
+        self._thread = None
+        self._stop_event = None
+        self._get_playing_apps = playing_apps_source or get_playing_apps
+        self._clock = clock
+
+    @property
+    def running(self):
+        with self._lock:
+            return (self._thread is not None and self._stop_event is not None
+                    and not self._stop_event.is_set() and self._thread.is_alive())
+
+    @property
+    def thread(self):
+        return self._thread
 
     def start(self):
-        self.running = True
-        self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
-        self.thread.start()
+        """Start monitoring. Safe to call repeatedly; returns False if already running."""
+        with self._lock:
+            if (self._thread is not None and self._stop_event is not None
+                    and not self._stop_event.is_set() and self._thread.is_alive()):
+                return False
+            previous = self._thread
+            stop_event = threading.Event()
+            thread = threading.Thread(target=self._run, args=(stop_event, previous),
+                                      daemon=True, name="AudioMonitor")
+            self._stop_event = stop_event
+            self._thread = thread
+            thread.start()
+        return True
 
-    def stop(self):
-        self.running = False
+    def stop(self, wait=False, timeout=2.0):
+        """Stop monitoring. Safe to call repeatedly and from any thread."""
+        with self._lock:
+            thread, stop_event = self._thread, self._stop_event
+        if stop_event is not None:
+            stop_event.set()
+        if wait and thread is not None and thread is not threading.current_thread():
+            thread.join(timeout)
+            if thread.is_alive():
+                log.warning("Monitor worker did not exit within %.1fs", timeout)
 
-    def _monitor_loop(self):
-        silence_start   = None
-        ambient_triggered = False
-        cooldown_until  = 0
-        ducked          = False
-        unduck_start    = None
+    def _stop_from_worker(self, stop_event, reason):
+        """A worker decided to stop itself (e.g. playback finished)."""
+        with self._lock:
+            is_current = self._stop_event is stop_event
+        stop_event.set()
+        if is_current:
+            self.app.on_monitor_auto_stopped(reason)
 
+    def _run(self, stop_event, previous):
+        if previous is not None and previous.is_alive():
+            previous.join(self.PREVIOUS_JOIN_SECS)
+            if previous.is_alive():
+                log.warning("Previous monitor worker still busy after %.1fs",
+                            self.PREVIOUS_JOIN_SECS)
+        if stop_event.is_set():
+            return
+        log.info("Monitoring started")
+        state = _MonitorState()
         self.app.set_status("Monitoring... waiting for silence.")
+        while not stop_event.wait(self.POLL_INTERVAL):
+            try:
+                self._tick(state, stop_event)
+            except Exception:
+                # Unknown audio state: don't count this time as silence.
+                state.silence_start = None
+                log_throttled("monitor_tick", logging.ERROR,
+                              "Monitor cycle failed", exc_info=True)
+        log.info("Monitoring stopped")
 
-        while self.running:
-            time.sleep(0.5)
-            silence_secs = float(self.app.config["silence_seconds"])
-            fade_enabled = self.app.config.get("fade_enabled", True)
-            fade_secs    = 2.0 if fade_enabled else 0.01
-            duck_percent = float(self.app.config.get("duck_percent", 0))
-            max_vol      = float(self.app.config["max_volume"])
-            excluded     = self.app.config.get("excluded_apps", [])
-            mirror_fix   = self.app.config.get("discord_mirror_fix", False)
-            now          = time.time()
+    def _apply_mirror_fix(self, raw_apps, settings):
+        fix = self.app.mirror_fix
+        if not (settings.mirror_fix and fix is not None and settings.mirror_apps):
+            return raw_apps
+        # Apps on the mirroring list only count if they really output sound.
+        return {name for name in raw_apps
+                if name not in settings.mirror_apps or fix.is_real_audio(name)}
 
-            raw_apps = get_playing_apps(excluded)
+    def _check_suspects(self, s, current_apps, settings, now):
+        """An app that starts "playing" right after our ambient sound starts is
+        probably reacting to it. Tell the UI so it can offer a one-click fix."""
+        if now - s.ambient_started_at > settings.fade_secs + 2.0 + MIRROR_SUSPECT_SECONDS:
+            return
+        suspects = sorted(n for n in current_apps if n not in settings.mirror_apps)
+        if suspects:
+            log.info("Audio from %s started right after ambient; may be mirroring",
+                     ", ".join(suspects))
+            self.app.on_suspected_mirror(suspects)
 
-            # Apply Discord mirror fix
-            if mirror_fix and self.app.discord_fix:
-                current_apps = set()
-                for name in raw_apps:
-                    if name in FINGERPRINT_APPS:
-                        # Only include Discord if it's playing real audio
-                        if self.app.discord_fix.is_real_discord_audio():
-                            current_apps.add(name)
-                    else:
-                        current_apps.add(name)
-            else:
-                current_apps = raw_apps
+    def _tick(self, s, stop_event):
+        app = self.app
+        settings = runtime_settings(app.config)
+        raw_apps = self._get_playing_apps(settings.excluded)
+        if stop_event.is_set():
+            return
+        current_apps = self._apply_mirror_fix(raw_apps, settings)
+        names = ", ".join(sorted(current_apps))
+        player = app.player
+        now = self._clock()
 
-            if ambient_triggered:
-                if now < cooldown_until:
-                    self.app.set_status("Playing ambient sound...")
-                    continue
+        if s.ambient_triggered:
+            if now < s.cooldown_until:
+                app.set_status("Playing ambient sound...")
+                return
 
-                if not self.app.player.playing and not ducked:
-                    ambient_triggered = False
-                    silence_start = None
-                    self.app.stop_monitoring()
-                    continue
+            if not player.playing and not s.ducked:
+                s.ambient_triggered = False
+                s.silence_start = None
+                reason = player.last_error or "Playback finished — monitoring stopped."
+                log.info("Ambient playback ended; stopping monitoring (%s)", reason)
+                self._stop_from_worker(stop_event, reason)
+                return
 
-                if current_apps:
-                    if duck_percent == 0:
-                        ducked = False
-                        unduck_start = None
-                        self.app.stop_ambient()
-                        ambient_triggered = False
-                        silence_start = None
-                        self.app.set_status(
-                            f"External audio detected ({', '.join(current_apps)}) — ambient stopped.")
-                    else:
-                        if not ducked:
-                            ducked = True
-                            unduck_start = None
-                            duck_vol = (duck_percent / 100.0) * max_vol
-                            self.app.duck_ambient(duck_vol)
-                            self.app.set_status(
-                                f"External audio detected — ambient ducked to {int(duck_percent)}%.")
-                        else:
-                            unduck_start = None
-                            self.app.set_status(
-                                f"External audio detected — ambient ducked to {int(duck_percent)}%.")
+            if current_apps:
+                if settings.duck_percent == 0:
+                    s.ducked = False
+                    s.unduck_start = None
+                    log.info("External audio detected (%s); stopping ambient", names)
+                    self._check_suspects(s, current_apps, settings, now)
+                    app.stop_ambient()
+                    s.ambient_triggered = False
+                    s.silence_start = None
+                    app.set_status(f"External audio detected ({names}) — ambient stopped.")
                 else:
-                    if ducked:
-                        if unduck_start is None:
-                            unduck_start = now
-                        elapsed = now - unduck_start
-                        remaining = silence_secs - elapsed
-                        if remaining > 0:
-                            self.app.set_status(
-                                f"Silence returned — fading back up in {remaining:.0f}s")
-                        else:
-                            ducked = False
-                            unduck_start = None
-                            self.app.unduck_ambient(max_vol)
-                            self.app.set_status("Playing ambient sound...")
+                    if not s.ducked:
+                        s.ducked = True
+                        s.unduck_start = None
+                        duck_vol = (settings.duck_percent / 100.0) * settings.max_vol
+                        log.info("External audio detected (%s); ducking to %d%%",
+                                 names, int(settings.duck_percent))
+                        self._check_suspects(s, current_apps, settings, now)
+                        app.duck_ambient(duck_vol)
                     else:
-                        self.app.set_status("Playing ambient sound...")
+                        s.unduck_start = None
+                    app.set_status(
+                        f"External audio detected — ambient ducked to {int(settings.duck_percent)}%.")
             else:
-                if current_apps:
-                    silence_start = None
-                    self.app.set_status(
-                        f"Audio playing ({', '.join(current_apps)}). Monitoring...")
-                else:
-                    if silence_start is None:
-                        silence_start = now
-                    elapsed = now - silence_start
-                    if elapsed >= silence_secs:
-                        ambient_triggered = True
-                        cooldown_until = now + fade_secs + 2.0
-                        ducked = False
-                        unduck_start = None
-                        self.app.play_ambient()
+                if s.ducked:
+                    if s.unduck_start is None:
+                        s.unduck_start = now
+                    remaining = settings.silence_secs - (now - s.unduck_start)
+                    if remaining > 0:
+                        app.set_status(f"Silence returned — fading back up in {remaining:.0f}s")
                     else:
-                        remaining = silence_secs - elapsed
-                        self.app.set_status(
-                            f"Silence detected... playing in {remaining:.0f}s")
+                        s.ducked = False
+                        s.unduck_start = None
+                        log.info("Silence returned; restoring ambient volume")
+                        app.unduck_ambient(settings.max_vol)
+                        app.set_status("Playing ambient sound...")
+                else:
+                    app.set_status("Playing ambient sound...")
+        else:
+            if current_apps:
+                s.silence_start = None
+                app.set_status(f"Audio playing ({names}). Monitoring...")
+            else:
+                if s.silence_start is None:
+                    s.silence_start = now
+                elapsed = now - s.silence_start
+                if elapsed >= settings.silence_secs:
+                    log.info("Silent for %.0fs; starting ambient", elapsed)
+                    if app.play_ambient():
+                        s.ambient_triggered = True
+                        s.ambient_started_at = now
+                        s.cooldown_until = now + settings.fade_secs + 2.0
+                        s.ducked = False
+                        s.unduck_start = None
+                    else:
+                        s.silence_start = None
+                        reason = player.last_error or "Could not start ambient sound — monitoring stopped."
+                        self._stop_from_worker(stop_event, reason)
+                else:
+                    remaining = settings.silence_secs - elapsed
+                    app.set_status(f"Silence detected... playing in {remaining:.0f}s")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ambient player
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _SessionVolume:
+    """Sets this process's own volume in the Windows mixer (ISimpleAudioVolume).
+
+    Why not VLC's audio_set_volume()? VLC 3.0 doesn't apply a volume change
+    immediately: it needs the audio output lock (aout_VolumeSet), and while
+    the WASAPI output waits for buffer space it holds that lock and sleeps for
+    half the buffer length (wasapi.c). Requests made meanwhile pile up and
+    only the last one is applied when the lock is released. A 2 s fade then
+    plays as a few big jumps (GitHub issue #2: seen with .opus files).
+
+    VLC's Windows output ends up changing this same control (mmdevice.c,
+    with level = volume³), so calling it directly gives identical loudness,
+    applied instantly. Falls back to VLC when the session can't be found
+    (before the first stream exists, or if pycaw fails).
+    """
+
+    LOOKUP_INTERVAL = 0.1
+
+    def __init__(self, pid=None, sessions_source=None):
+        self._pid = pid or os.getpid()
+        self._sessions_source = sessions_source or AudioUtilities.GetAllSessions
+        self._controls = []
+        self._last_lookup = float("-inf")
+        self._lock = threading.Lock()
+
+    def refresh(self):
+        with self._lock:
+            self._last_lookup = float("-inf")
+            if not self._controls:
+                self._lookup_locked()
+
+    def _lookup_locked(self):
+        now = time.monotonic()
+        if now - self._last_lookup < self.LOOKUP_INTERVAL:
+            return
+        self._last_lookup = now
+        controls = []
+        try:
+            for session in self._sessions_source():
+                try:
+                    if session.ProcessId == self._pid:
+                        controls.append(session.SimpleAudioVolume)
+                except Exception:
+                    continue
+        except Exception:
+            log_throttled("session_volume_lookup", logging.WARNING,
+                          "Could not list audio sessions for volume control", exc_info=True)
+        if controls and not self._controls:
+            log.info("Using Windows mixer volume for fades (%d session%s)",
+                     len(controls), "s" if len(controls) != 1 else "")
+        self._controls = controls
+
+    def set(self, percent):
+        """Set volume (0-100, VLC scale). Returns False if not possible right now."""
+        level = max(0.0, min(1.0, percent / 100.0)) ** 3
+        with self._lock:
+            if not self._controls:
+                self._lookup_locked()
+                if not self._controls:
+                    return False
+            try:
+                for control in self._controls:
+                    control.SetMasterVolume(level, None)
+                return True
+            except Exception:
+                log_throttled("session_volume_set", logging.WARNING,
+                              "Setting Windows mixer volume failed; using VLC volume",
+                              exc_info=True)
+                self._controls = []
+                return False
+
+
+class _PlaybackSession:
+    """One play() call. Owns the VLC player from start until its thread exits."""
+
+    def __init__(self, mode, source):
+        self.mode = mode
+        self.source = source
+        self.stop_event = threading.Event()   # set by stop(); never cleared
+        self.track_started = threading.Event()
+        self.ever_started = False
+        self.finished = False
+        self.thread = None
+        self.current_path = None
+        self.current_index = 0
+        self.pending_pos = 0.0                # start position of the track being loaded
+        self.error = None
 
 
 class AmbientPlayer:
+    """VLC playback with fades, ducking and resume.
+
+    Threading rules:
+      - Each play() creates a session with its own stop Event and thread. A
+        new session waits for the previous session's thread (and its fade-out)
+        to finish before touching VLC, so two sessions never drive it at once.
+      - stop() never blocks: it records the resume point and signals the
+        session, whose own thread fades out and stops VLC.
+      - Every volume change (fade in/out, duck, unduck) takes a new ramp
+        generation; an older ramp sees the generation change and stops, so
+        fades can't fight each other.
+    """
+
+    FADE_STEPS        = 50
+    DUCK_STEPS        = 20
+    DUCK_STEP_SECONDS = 0.05
+    LOAD_TIMEOUT      = 5.0
+    AUDIO_START_TIMEOUT = 3.0   # max wait for sound to actually begin before fading in
+    POLL_SECONDS      = 0.3
+
     def __init__(self, app):
         self.app = app
-        self.playing = False
-        self.saved_pos = 0.0
-        self.playlist = []
-        self.playlist_index = 0
-        self._current_vol = 0
-        self._stop_event = threading.Event()
+        self._lock = threading.RLock()
+        self._session = None
+        self._ramp_gen = 0
+        self._resume = None
+        self._applied_vol = 0       # last volume we gave VLC
+        self._target_vol = 0        # where volume should settle (max or ducked)
+        self._closed = False
+        self.last_error = None
         self.vlc_instance = vlc.Instance("--quiet", "--no-video")
+        if self.vlc_instance is None:
+            raise RuntimeError("VLC could not be initialised. libvlc.dll or the "
+                               "plugins folder may be missing or incomplete.")
         self.media_player = self.vlc_instance.media_player_new()
+        self._session_volume = _SessionVolume()
+
+    # ── state ──
+
+    @property
+    def playing(self):
+        with self._lock:
+            s = self._session
+            return s is not None and not s.finished and not s.stop_event.is_set()
+
+    @property
+    def resume_state(self):
+        with self._lock:
+            return self._resume
 
     def _get_fade_secs(self):
-        return 2.0 if self.app.config.get("fade_enabled", True) else 0.01
+        return fade_seconds(self.app.config)
+
+    # ── VLC helpers ──
 
     def _set_volume(self, vol_percent):
         vol = max(0, min(100, int(vol_percent)))
-        self._current_vol = vol
-        self.media_player.audio_set_volume(vol)
-
-    def _get_volume(self):
-        return self.media_player.audio_get_volume()
+        self._applied_vol = vol
+        if self._session_volume.set(vol):
+            return
+        try:
+            self.media_player.audio_set_volume(vol)
+        except Exception:
+            log_throttled("vlc_volume", logging.WARNING, "VLC audio_set_volume failed",
+                          exc_info=True)
 
     def _is_playing(self):
-        return self.media_player.is_playing()
+        try:
+            return bool(self.media_player.is_playing())
+        except Exception:
+            log_throttled("vlc_is_playing", logging.WARNING, "VLC is_playing failed",
+                          exc_info=True)
+            return False
 
-    def _fade_in(self, target_vol):
-        fade_secs = self._get_fade_secs()
-        steps = 50
-        step_time = fade_secs / steps
-        self._set_volume(0)
-        for i in range(steps + 1):
-            if not self.playing or self._stop_event.is_set():
-                return False
-            self._set_volume((i / steps) * target_vol)
-            time.sleep(step_time)
+    def _media_stop(self):
+        try:
+            self.media_player.stop()
+        except Exception:
+            log.warning("VLC stop failed", exc_info=True)
+
+    # ── volume ramps ──
+
+    def _new_ramp(self):
+        with self._lock:
+            self._ramp_gen += 1
+            return self._ramp_gen
+
+    def _ramp(self, gen, target, secs, steps, abort_event=None, start=None,
+              stop_when_not_playing=False):
+        """Move volume to `target` over `secs`. Returns False if superseded/aborted."""
+        with self._lock:
+            begin = self._applied_vol if start is None else start
+        step_time = secs / steps if steps else 0
+        for i in range(1, steps + 1):
+            with self._lock:
+                if gen != self._ramp_gen:
+                    return False
+                if abort_event is not None and abort_event.is_set():
+                    return False
+                if stop_when_not_playing and not self._is_playing():
+                    return True
+                self._set_volume(begin + (target - begin) * (i / steps))
+            if step_time > 0:
+                time.sleep(step_time)
         return True
 
-    def _fade_out(self):
-        fade_secs = self._get_fade_secs()
-        steps = 50
-        step_time = fade_secs / steps
-        current = self._get_volume()
-        for i in range(steps):
-            if not self._is_playing():
-                break
-            self._set_volume(current * (1 - (i / steps)))
-            time.sleep(step_time)
-        self.media_player.stop()
+    def _start_level_ramp(self, target_vol, secs, steps, what):
+        with self._lock:
+            s = self._session
+            if s is None or s.finished or s.stop_event.is_set():
+                return
+            self._target_vol = max(0, min(100, target_vol))
+            if not s.track_started.is_set():
+                return   # the track's fade-in will go to the new target
+            gen = self._new_ramp()
+        threading.Thread(target=self._ramp,
+                         args=(gen, target_vol, secs, steps),
+                         kwargs={"abort_event": s.stop_event},
+                         daemon=True, name=f"Volume-{what}").start()
 
     def duck(self, target_vol):
-        try:
-            current = self._get_volume()
-            for i in range(21):
-                if not self.playing:
-                    return
-                self._set_volume(current + (target_vol - current) * (i / 20))
-                time.sleep(0.05)
-        except Exception:
-            pass
+        self._start_level_ramp(target_vol, self.DUCK_STEPS * self.DUCK_STEP_SECONDS,
+                               self.DUCK_STEPS, "duck")
 
     def unduck(self, target_vol):
-        try:
-            current = self._get_volume()
-            fade_secs = self._get_fade_secs()
-            steps = 50
-            step_time = fade_secs / steps
-            for i in range(steps + 1):
-                if not self.playing:
-                    return
-                self._set_volume(current + (target_vol - current) * (i / steps))
-                time.sleep(step_time)
-        except Exception:
-            pass
+        self._start_level_ramp(target_vol, self._get_fade_secs(), self.FADE_STEPS, "unduck")
+
+    # ── play / stop ──
 
     def play(self, config):
-        if self.playing:
-            return
-        self.playing = True
-        self._stop_event.clear()
+        """Start playback in the background. Returns False if nothing can be played."""
+        with self._lock:
+            if self._closed:
+                return False
+            if self.playing:
+                return True
+
+        # File-system checks happen outside the lock: a slow network folder
+        # must not stall a stop() coming from the UI.
         mode = config.get("mode", "single")
-
-        if mode == "single":
-            path = config.get("mp3_path", "")
-            loop_mode = config.get("single_loop_mode", "loop")
-            if not path or not os.path.exists(path):
-                self.app.set_status("No valid audio file selected!", error=True)
-                self.playing = False
-                return
-            threading.Thread(
-                target=self._play_single,
-                args=(path, config["max_volume"], loop_mode),
-                daemon=True).start()
-        else:
-            folder = config.get("playlist_folder", "")
-            if not folder or not os.path.isdir(folder):
-                self.app.set_status("No valid playlist folder selected!", error=True)
-                self.playing = False
-                return
-            files = []
-            for ext in SUPPORTED_EXTENSIONS:
-                files.extend(glob.glob(os.path.join(folder, ext)))
-            files = sorted(files)
+        error = validate_ambient_source(config)
+        files = []
+        if error is None and mode == "playlist":
+            files = collect_playlist(config["playlist_folder"])
             if not files:
-                self.app.set_status("No supported audio files found in folder!", error=True)
-                self.playing = False
-                return
-            self.playlist = files
-            self.playlist_index = 0
-            threading.Thread(
-                target=self._play_playlist,
-                args=(config["max_volume"], config.get("playlist_loop_mode", "loop_playlist")),
-                daemon=True).start()
+                error = f"The playlist folder doesn't contain any supported audio files ({SUPPORTED_LABEL})."
+        if error:
+            self.last_error = error.replace("\n", " ")
+            log.warning("Cannot start ambient: %s", self.last_error)
+            self.app.set_status(self.last_error)
+            return False
 
-    def _load_and_play(self, path, start_pos=0.0):
+        with self._lock:
+            if self._closed:
+                return False
+            if self.playing:
+                return True
+            resume, self._resume = self._resume, None
+            max_vol = runtime_settings(config).max_vol
+            if mode == "single":
+                path = config["mp3_path"]
+                s = _PlaybackSession("single", path)
+                start_pos = plan_single_start(path, resume)
+                s.current_path, s.current_index, s.pending_pos = path, 0, start_pos
+                target, args = self._run_single, (s, path, max_vol,
+                                                  config.get("single_loop_mode", "loop"))
+            else:
+                folder = config["playlist_folder"]
+                s = _PlaybackSession("playlist", folder)
+                index, start_pos = plan_playlist_start(folder, files, resume)
+                s.current_path, s.current_index, s.pending_pos = files[index], index, start_pos
+                target, args = self._run_playlist, (s, files, index, start_pos, max_vol)
+
+            if resume is not None:
+                log.info("Resume point %s @ %.1fs → starting %s @ %.1fs",
+                         os.path.basename(resume.path or "?"), resume.position,
+                         os.path.basename(s.current_path), s.pending_pos)
+
+            previous = self._session.thread if self._session is not None else None
+            self.last_error = None
+            self._session = s
+            s.thread = threading.Thread(target=self._run_session,
+                                        args=(s, previous, target, args),
+                                        daemon=True, name="AmbientPlayback")
+            s.thread.start()
+            return True
+
+    def stop(self, wait=False, timeout=None):
+        """Stop playback with a fade-out. Never blocks unless wait=True."""
+        with self._lock:
+            s = self._session
+            if s is None:
+                return
+            if not s.finished and not s.stop_event.is_set():
+                self._resume = self._capture_resume(s)
+                log.info("Stopping ambient; resume point %s @ %.1fs",
+                         os.path.basename(self._resume.path or "?"), self._resume.position)
+                s.stop_event.set()
+                if s.ever_started:
+                    # Cancel this session's duck/unduck now. (If it never touched
+                    # VLC, a previous session may still be fading out; leave it.)
+                    self._new_ramp()
+            thread = s.thread
+        if wait and thread is not None and thread is not threading.current_thread():
+            thread.join(timeout)
+
+    def shutdown(self, timeout=None):
+        """Stop (with fade), wait for the playback thread, release VLC."""
+        if timeout is None:
+            timeout = self._get_fade_secs() + self.LOAD_TIMEOUT + 2.0
+        self.stop(wait=True, timeout=timeout)
+        with self._lock:
+            self._closed = True
+        try:
+            self.media_player.stop()
+            self.media_player.release()
+            self.vlc_instance.release()
+        except Exception:
+            log.warning("Releasing VLC failed", exc_info=True)
+
+    def _capture_resume(self, s):
+        pos = s.pending_pos
+        if s.track_started.is_set():
+            try:
+                ms = self.media_player.get_time()
+                if ms is not None and ms >= 0:
+                    pos = ms / 1000.0
+            except Exception:
+                log.warning("VLC get_time failed; resuming at track start", exc_info=True)
+        return ResumeState(s.mode, s.source, s.current_path, s.current_index, float(pos))
+
+    # ── session thread ──
+
+    def _run_session(self, s, previous, target, args):
+        try:
+            if previous is not None and previous.is_alive():
+                previous.join(self._get_fade_secs() + self.LOAD_TIMEOUT + 2.0)
+                if previous.is_alive():
+                    log.error("Previous playback thread is stuck; starting anyway")
+            if not s.stop_event.is_set():
+                target(*args)
+        except Exception as e:
+            log.exception("Playback error")
+            s.error = f"Playback error: {e}"
+            self.app.set_status(s.error)
+        finally:
+            try:
+                if s.ever_started:
+                    if s.stop_event.is_set():
+                        gen = self._new_ramp()
+                        self._ramp(gen, 0, self._get_fade_secs(), self.FADE_STEPS,
+                                   stop_when_not_playing=True)
+                    self._media_stop()
+            except Exception:
+                log.exception("Error while stopping playback")
+                self._media_stop()
+            with self._lock:
+                s.finished = True
+                if s.error:
+                    self.last_error = s.error
+                if self._session is s:
+                    self._session = None
+
+    def _load_and_play(self, s, path, start_pos=0.0, wait_for_audio=False):
+        """Load `path` and wait until VLC is actually playing it.
+
+        With wait_for_audio, also wait until sound really comes out (see
+        _wait_for_audio_start) while holding the volume at 0.
+        """
+        if not os.path.isfile(path):
+            log.warning("Audio file missing: %s", path)
+            return False
+        with self._lock:
+            s.ever_started = True   # from here on this session must stop VLC on exit
         media = self.vlc_instance.media_new(path)
         self.media_player.set_media(media)
+        try:
+            media.release()   # the player keeps its own reference
+        except Exception:
+            pass
+        t_play = time.monotonic()
         self.media_player.play()
-        for _ in range(20):
-            time.sleep(0.1)
-            if self.media_player.is_playing():
-                break
+
+        deadline = time.monotonic() + self.LOAD_TIMEOUT
+        while not self._is_playing():
+            if s.stop_event.wait(0.1):
+                return False
+            try:
+                state = self.media_player.get_state()
+            except Exception:
+                state = None
+            if state == vlc.State.Error:
+                log.warning("VLC could not play %s", path)
+                return False
+            if time.monotonic() > deadline:
+                log.warning("VLC did not start %s within %.0fs (state %s)",
+                            path, self.LOAD_TIMEOUT, state)
+                return False
+
         if start_pos > 0.5:
-            self.media_player.set_time(int(start_pos * 1000))
-
-    def _play_single(self, path, max_vol, loop_mode):
-        try:
-            self._load_and_play(path, self.saved_pos)
-            self.saved_pos = 0.0
-            if not self._fade_in(max_vol):
-                return
-            if loop_mode == "loop":
-                while self.playing and not self._stop_event.is_set():
-                    if not self._is_playing():
-                        self._load_and_play(path, 0.0)
-                        self._set_volume(max_vol)
-                    time.sleep(0.3)
+            try:
+                length_ms = self.media_player.get_length()
+            except Exception:
+                length_ms = -1
+            if length_ms and length_ms > 0 and start_pos * 1000 >= length_ms - 1000:
+                log.info("Resume point %.1fs is past the end of %s; starting from 0",
+                         start_pos, os.path.basename(path))
             else:
-                while self.playing and not self._stop_event.is_set():
-                    if not self._is_playing():
-                        break
-                    time.sleep(0.3)
-                self.playing = False
-        except Exception as e:
-            self.app.set_status(f"Playback error: {e}", error=True)
-            self.playing = False
+                self.media_player.set_time(int(start_pos * 1000))
+        t_playing = time.monotonic()
+        if wait_for_audio:
+            if not self._wait_for_audio_start(s):
+                return False
+            log.info("Started %s: VLC 'playing' after %.0f ms, sound after %.0f ms",
+                     os.path.basename(path), (t_playing - t_play) * 1000,
+                     (time.monotonic() - t_play) * 1000)
+        return True
 
-    def _play_playlist(self, max_vol, loop_mode):
+    def _wait_for_audio_start(self, s):
+        """Wait until VLC's playback clock starts moving, i.e. sound is coming out.
+
+        VLC reports "playing" well before the first audio is heard: about
+        270 ms for MP3 and about 830 ms for Opus (measured with VLC 3.0), plus
+        the time Windows needs to open the audio device the first time. A
+        fade-in started at "playing" is therefore partly spent in silence and
+        the sound then jumps in at a high volume (GitHub issue #2). After a
+        seek, get_time() reports the target at once and only counts up once
+        audio really plays, so "moved past its first value" works for both.
+        Holds the mixer volume at 0 meanwhile, in case VLC re-applies an older
+        volume when it opens the audio output.
+        """
         try:
-            first_song = True
-            while self.playing and not self._stop_event.is_set():
-                loop_mode = self.app.config["playlist_loop_mode"]
-                if self.playlist_index >= len(self.playlist):
-                    if loop_mode == "loop_playlist":
-                        self.playlist_index = 0
-                    else:
-                        self.playing = False
-                        break
-                path = self.playlist[self.playlist_index]
-                self.app.set_status(f"Playing: {os.path.basename(path)}")
-                self._load_and_play(path, self.saved_pos if first_song else 0.0)
-                self.saved_pos = 0.0
-                first_song = False
-                if not self._fade_in(max_vol):
-                    return
-                while self.playing and not self._stop_event.is_set():
-                    if not self._is_playing():
-                        break
-                    time.sleep(0.3)
-                if not self.playing or self._stop_event.is_set():
-                    return
-                current_mode = self.app.config["playlist_loop_mode"]
-                if current_mode == "loop_song":
-                    self._load_and_play(path, 0.0)
-                    self._set_volume(max_vol)
-                elif current_mode == "stop":
-                    self.playing = False
-                    break
-                else:
-                    self.playlist_index += 1
-        except Exception as e:
-            self.app.set_status(f"Playback error: {e}", error=True)
-            self.playing = False
+            baseline = max(0, self.media_player.get_time() or 0)
+        except Exception:
+            return True
+        deadline = time.monotonic() + self.AUDIO_START_TIMEOUT
+        while time.monotonic() < deadline:
+            if s.stop_event.wait(0.01):
+                return False
+            # Mixer session only: a VLC volume request made now could be
+            # deferred by VLC and land in the middle of the fade (see
+            # _SessionVolume). VLC itself was set to 0 before play().
+            self._session_volume.set(0)
+            try:
+                if (self.media_player.get_time() or 0) > baseline:
+                    # The audio stream (and its mixer session) exists now.
+                    self._session_volume.refresh()
+                    self._session_volume.set(0)
+                    return True
+            except Exception:
+                return True
+        log.info("Playback clock didn't start within %.1fs; fading in anyway",
+                 self.AUDIO_START_TIMEOUT)
+        return True
 
-    def stop(self):
-        if not self.playing:
+    def _start_track(self, s, path, start_pos, index, fade):
+        with self._lock:
+            if s.stop_event.is_set():
+                return False
+            s.track_started.clear()
+            s.current_path, s.current_index, s.pending_pos = path, index, start_pos
+            self._new_ramp()
+            # Start silent when fading in (no blip at the old volume).
+            self._set_volume(0 if fade else self._target_vol)
+        if not self._load_and_play(s, path, start_pos, wait_for_audio=fade):
+            return False
+        with self._lock:
+            if s.stop_event.is_set():
+                return False        # the session thread fades out and stops VLC
+            s.track_started.set()
+            if not fade:
+                self._set_volume(self._target_vol)
+                return True
+            gen = self._new_ramp()
+            target = self._target_vol
+        self._ramp(gen, target, self._get_fade_secs(), self.FADE_STEPS,
+                   abort_event=s.stop_event, start=0)
+        return not s.stop_event.is_set()
+
+    def _wait_for_track_end(self, s):
+        while not s.stop_event.is_set() and self._is_playing():
+            s.stop_event.wait(self.POLL_SECONDS)
+
+    def _run_single(self, s, path, max_vol, loop_mode):
+        with self._lock:
+            self._target_vol = max_vol
+        if not self._start_track(s, path, s.pending_pos, 0, fade=True):
+            if not s.stop_event.is_set():
+                s.error = f"Could not play {os.path.basename(path)}."
+                self.app.set_status(s.error)
             return
-        try:
-            self.saved_pos = self.media_player.get_time() / 1000.0
-        except Exception:
-            self.saved_pos = 0.0
-        self._stop_event.set()
-        self.playing = False
-        try:
-            self._fade_out()
-        except Exception:
-            self.media_player.stop()
+        while not s.stop_event.is_set():
+            self._wait_for_track_end(s)
+            if s.stop_event.is_set() or loop_mode != "loop":
+                return
+            if not self._start_track(s, path, 0.0, 0, fade=False):
+                if not s.stop_event.is_set():
+                    s.error = f"Could not play {os.path.basename(path)} — the file may have been moved or deleted."
+                    self.app.set_status(s.error)
+                return
+
+    def _run_playlist(self, s, files, index, start_pos, max_vol):
+        with self._lock:
+            self._target_vol = max_vol
+        failures = 0
+        while not s.stop_event.is_set():
+            loop_mode = self.app.config.get("playlist_loop_mode", "loop_playlist")
+            if index >= len(files):
+                if loop_mode == "loop_playlist":
+                    index = 0
+                else:
+                    return
+            path = files[index]
+            self.app.set_status(f"Playing: {os.path.basename(path)}")
+            if not self._start_track(s, path, start_pos, index, fade=True):
+                if s.stop_event.is_set():
+                    return
+                failures += 1
+                if failures >= len(files):
+                    s.error = "None of the files in the playlist could be played."
+                    self.app.set_status(s.error)
+                    return
+                index += 1
+                start_pos = 0.0
+                continue
+            failures = 0
+            start_pos = 0.0
+            self._wait_for_track_end(s)
+            if s.stop_event.is_set():
+                return
+            current_mode = self.app.config.get("playlist_loop_mode", "loop_playlist")
+            if current_mode == "loop_song":
+                continue            # same index: the next iteration loads it once
+            if current_mode == "stop":
+                return
+            index += 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UI
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MarqueeLabel(tk.Canvas):
+    """A one-line label that scrolls its text when it doesn't fit.
+
+    - Fits → stays still.
+    - Too long → waits, glides left at a slow constant speed, loops seamlessly
+      (a second copy follows after a gap) and pauses again at the start of
+      every cycle. Edges fade out instead of cutting letters in half.
+    - Pauses while hovered (so anyone can stop it to read it), and while not
+      visible (hidden tab/window).
+    - Scrolls even when Windows "Animation effects" is off: people turn that
+      off for the whole system, not to lose this. animate=False shows a still
+      name ending in "…" instead.
+    """
+
+    SPEED_PX_PER_S = 30
+    START_PAUSE_MS = 2500
+    FRAME_MS       = 16
+    GAP_PX         = 48
+    PAD_X          = 8
+    FADE_PX        = 18
+
+    def __init__(self, parent, textvariable, width_chars, bg, fg,
+                 font=("Segoe UI", 10), on_click=None, animate=True):
+        self._font = tkfont.Font(root=parent, family=font[0], size=font[1])
+        width = self._font.measure("0") * width_chars + 16
+        height = self._font.metrics("linespace") + 14
+        super().__init__(parent, width=width, height=height, bg=bg,
+                         highlightthickness=0, bd=0, cursor="hand2" if on_click else "")
+        self._width, self._height = width, height
+        self._bg, self._var = bg, textvariable
+        self._animate = animate
+        self._hover = False
+        self._after = None
+        self._offset = 0.0
+        self._text_w = 0
+        self._scrolling = False
+        self._last = None
+        y = height / 2
+        self._items = [self.create_text(self.PAD_X, y, anchor="w", fill=fg, font=self._font)
+                       for _ in range(2)]
+        self._fade_left, self._fade_right = self._make_fades()
+        self._fade_items = [self.create_image(0, 0, anchor="nw", image=self._fade_left),
+                            self.create_image(width - self.FADE_PX, 0, anchor="nw",
+                                              image=self._fade_right)]
+        if on_click:
+            self.bind("<Button-1>", lambda e: on_click())
+        self.bind("<Enter>", lambda e: self._set_hover(True), add="+")
+        self.bind("<Leave>", lambda e: self._set_hover(False), add="+")
+        self.bind("<Destroy>", lambda e: self._cancel(), add="+")
+        textvariable.trace_add("write", lambda *a: self.reset())
+        self.reset()
+
+    @property
+    def text(self):
+        return self._var.get()
+
+    @property
+    def scrolling(self):
+        return self._scrolling
+
+    def _make_fades(self):
+        r, g, b = (v // 256 for v in self.winfo_rgb(self._bg))
+        right = Image.new("RGBA", (self.FADE_PX, self._height))
+        for x in range(self.FADE_PX):
+            alpha = int(255 * (x + 1) / self.FADE_PX)
+            for y in range(self._height):
+                right.putpixel((x, y), (r, g, b, alpha))
+        left = right.transpose(Image.FLIP_LEFT_RIGHT)
+        return ImageTk.PhotoImage(left, master=self), ImageTk.PhotoImage(right, master=self)
+
+    def _cancel(self):
+        if self._after is not None:
+            try:
+                self.after_cancel(self._after)
+            except Exception:
+                pass
+            self._after = None
+
+    def _set_hover(self, on):
+        self._hover = on
+        self._last = None   # don't jump forward by the paused time
+
+    def reset(self):
+        """Re-measure the text and restart from the beginning."""
+        self._cancel()
+        text = self._var.get()
+        avail = self._width - 2 * self.PAD_X
+        self._text_w = self._font.measure(text)
+        self._offset = 0.0
+        self._last = None
+        overflow = self._text_w > avail
+        self._scrolling = overflow and self._animate
+        shown = text
+        if overflow and not self._animate:
+            while shown and self._font.measure(shown + "…") > avail:
+                shown = shown[:-1]
+            shown = shown.rstrip() + "…"
+        self.itemconfigure(self._items[0], text=shown)
+        self.itemconfigure(self._items[1], text=text if self._scrolling else "")
+        self._place()
+        self.itemconfigure(self._fade_items[1], state="normal" if self._scrolling else "hidden")
+        self.itemconfigure(self._fade_items[0], state="hidden")
+        if self._scrolling:
+            self._after = self.after(self.START_PAUSE_MS, self._tick)
+
+    def _place(self):
+        x = self.PAD_X - self._offset
+        y = self._height / 2
+        self.coords(self._items[0], x, y)
+        self.coords(self._items[1], x + self._text_w + self.GAP_PX, y)
+
+    def _tick(self):
+        self._after = None
+        if not self._scrolling:
+            return
+        if self._hover or not self.winfo_viewable():
+            self._last = None
+            self._after = self.after(200, self._tick)
+            return
+        now = time.monotonic()
+        if self._last is not None:
+            # Time-based, so the speed stays constant even if frames are late.
+            self._offset += self.SPEED_PX_PER_S * (now - self._last)
+        self._last = now
+        cycle = self._text_w + self.GAP_PX
+        if self._offset >= cycle:
+            self._offset = 0.0
+            self._last = None
+            self._place()
+            self.itemconfigure(self._fade_items[0], state="hidden")
+            self._after = self.after(self.START_PAUSE_MS, self._tick)
+            return
+        self._place()
+        self.itemconfigure(self._fade_items[0], state="normal")
+        self._after = self.after(self.FRAME_MS, self._tick)
 
 
 class App:
-    def __init__(self, root):
+    WINDOW_W, WINDOW_H = 520, 660
+    UI_POLL_MS = 50
+
+    def __init__(self, root, instance=None, config_notice=None, config=None):
         self.root = root
         self.root.title("Silence Player")
-        self.root.geometry("520x660")
+        self.root.geometry(f"{self.WINDOW_W}x{self.WINDOW_H}")
         self.root.resizable(False, False)
         self.root.configure(bg="#1e1e2e")
-        self.root.protocol("WM_DELETE_WINDOW", self._hide_window)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_window_close)
+        self.root.report_callback_exception = self._report_tk_exception
 
         try:
             self.root.iconphoto(True, tk.PhotoImage(file=resource_path("icon.png")))
         except Exception:
-            pass
+            log.warning("Could not load icon.png", exc_info=True)
 
-        self.config      = load_config()
+        self._ui_queue   = queue.Queue()
+        self._ui_alive   = True
+        self._quitting   = False
+
+        if config is None:
+            config, config_notice = load_config()
+        self.config      = config
         self.monitor     = AudioMonitor(self)
         self.player      = AmbientPlayer(self)
-        self.discord_fix = None
+        self.mirror_fix  = None
+        self._mirror_names = enabled_mirror_apps(config)
+        self._dismissed_suspects = set()
+        self._notified_suspects = set()
+        self._suggested  = []
         self.monitoring  = False
         self._status     = "Ready."
         self.tray        = None
+        self.instance    = instance
 
         self._build_ui()
-        threading.Thread(target=self._build_tray, daemon=True).start()
-        self._start_monitoring()
-        self.root.after(100, self._hide_window)
+        self.root.after(self.UI_POLL_MS, self._drain_ui_queue)
+        threading.Thread(target=self._build_tray, daemon=True, name="Tray").start()
+        if instance is not None:
+            instance.listen(lambda: self.call_in_ui(self._show_window))
 
-    def _start_discord_fix(self):
-        if self.discord_fix is None:
-            self.discord_fix = DiscordMirrorFix()
-            self.discord_fix.start()
+        problem = validate_ambient_source(self.config)
+        if problem is None:
+            self._start_monitoring()
+            if config_notice:
+                self.set_status(config_notice)
+            else:
+                self.root.after(100, self.root.withdraw)
+        else:
+            # First run (or the saved file/folder is gone): keep Settings open.
+            log.info("No playable ambient source configured; showing Settings (%s)",
+                     problem.replace("\n", " "))
+            first_run = not self.config.get("mp3_path") and not self.config.get("playlist_folder")
+            if first_run:
+                msg = ("Welcome! Choose an ambient sound file (or a playlist folder), "
+                       "then click Start Monitoring.")
+            else:
+                msg = problem.replace("\n", " ") + " Choose a new one, then click Start Monitoring."
+            self.set_status(config_notice + " " + msg if config_notice else msg)
+            self._show_window()
 
-    def _stop_discord_fix(self):
-        if self.discord_fix is not None:
-            fix = self.discord_fix
-            self.discord_fix = None  # set None first so monitor stops using it
-            threading.Thread(target=fix.stop, daemon=True).start()
+    # ── thread-safe UI access ──
+
+    def call_in_ui(self, fn, *args):
+        """Run fn(*args) on the Tk thread. Safe to call from any thread."""
+        if self._ui_alive:
+            self._ui_queue.put((fn, args))
+
+    def _drain_ui_queue(self):
+        if not self._ui_alive:
+            return
+        try:
+            while True:
+                fn, args = self._ui_queue.get_nowait()
+                try:
+                    fn(*args)
+                except Exception:
+                    log.exception("UI callback failed")
+        except queue.Empty:
+            pass
+        try:
+            self.root.after(self.UI_POLL_MS, self._drain_ui_queue)
+        except Exception:
+            pass
+
+    def _report_tk_exception(self, exc, val, tb):
+        log.error("Unhandled Tk callback error", exc_info=(exc, val, tb))
+
+    def set_status(self, msg):
+        if msg == self._status:
+            return
+        self._status = msg
+        self.call_in_ui(self.status_var.set, msg)
+
+    # ── config persistence ──
+    #
+    # Changes apply to the running app immediately, but config.json is only
+    # written when the user clicks "Save Settings" (see _save_settings).
+    # Closing, quitting or starting monitoring never saves.
+
+    def _save_now(self):
+        return save_config(self.config)
+
+    # ── Mirroring Fix ──
+
+    def _apply_mirror_state(self):
+        """Start or stop the Mirroring Fix to match the config."""
+        self._mirror_names = enabled_mirror_apps(self.config)
+        if self.config.get("mirror_fix_enabled", True) and PROCTAP_IMPORT_ERROR is None:
+            if self.mirror_fix is None:
+                self.mirror_fix = MirrorFix(apps_source=lambda: self._mirror_names)
+                self.mirror_fix.start()
+        else:
+            if PROCTAP_IMPORT_ERROR is not None and self.config.get("mirror_fix_enabled", True):
+                log_throttled("mirror_unavailable", logging.WARNING,
+                              "Mirroring Fix unavailable: %s", PROCTAP_IMPORT_ERROR,
+                              interval=3600)
+            self._stop_mirror_fix()
+
+    def _stop_mirror_fix(self, wait=False):
+        if self.mirror_fix is not None:
+            fix = self.mirror_fix
+            self.mirror_fix = None  # set None first so monitor stops using it
+            if wait:
+                fix.stop()
+            else:
+                threading.Thread(target=fix.stop, daemon=True, name="MirrorStop").start()
+
+    def _set_mirror_app(self, name, enabled=True):
+        """Add `name` to the mirroring list (or change its toggle)."""
+        apps = _coerce_mirror_apps(self.config.get("mirror_apps", []))
+        for a in apps:
+            if a["name"] == name:
+                a["enabled"] = enabled
+                break
+        else:
+            apps.append({"name": name, "enabled": enabled})
+        self.config["mirror_apps"] = apps
+
+    def on_suspected_mirror(self, names):
+        """Called from the monitor thread."""
+        self.call_in_ui(self._show_mirror_suggestion, list(names))
+
+    def _show_mirror_suggestion(self, names):
+        excluded = set(self.config.get("excluded_apps", []))
+        names = [n for n in names
+                 if n not in self._dismissed_suspects and n not in self._mirror_names
+                 and n not in excluded]
+        if not names:
+            return
+        self._suggested = names
+        label = ", ".join(names)
+        self.suggest_label.config(
+            text=f"{label} started playing right after your ambient sound. "
+                 f"It may only be reacting to it (mirroring).")
+        self.suggest_btn.config(
+            text="Treat as mirroring app" if PROCTAP_IMPORT_ERROR is None else "Exclude it")
+        if not self.suggest_row.winfo_ismapped():
+            self.suggest_row.pack(fill="x", before=self.status_label)
+            self.root.update_idletasks()
+            # Grow the (fixed-size) window so the bar doesn't cover the settings.
+            self.root.geometry(f"{self.WINDOW_W}x{self.WINDOW_H + self.suggest_row.winfo_reqheight()}")
+        new = [n for n in names if n not in self._notified_suspects]
+        if new and self.tray is not None and self.root.state() == "withdrawn":
+            self._notified_suspects.update(new)
+            try:
+                self.tray.notify(f"{', '.join(new)} may be mirroring your ambient sound. "
+                                 f"Open Settings to fix it in one click.", "Silence Player")
+            except Exception:
+                log.debug("Tray notification failed", exc_info=True)
+
+    def _hide_mirror_suggestion(self):
+        if self.suggest_row.winfo_ismapped():
+            self.suggest_row.pack_forget()
+            self.root.geometry(f"{self.WINDOW_W}x{self.WINDOW_H}")
+        self._suggested = []
+
+    def _dismiss_mirror_suggestion(self):
+        self._dismissed_suspects.update(self._suggested)
+        self._hide_mirror_suggestion()
+
+    def _accept_mirror_suggestion(self):
+        names = list(self._suggested)
+        self._hide_mirror_suggestion()
+        if not names:
+            return
+        label = ", ".join(names)
+        if PROCTAP_IMPORT_ERROR is None:
+            for n in names:
+                self._set_mirror_app(n, True)
+            if not self.config.get("mirror_fix_enabled", True):
+                self.config["mirror_fix_enabled"] = True
+                self.mirror_fix_var.set(True)
+            self._apply_mirror_state()
+            self._refresh_mirror_ui()
+            log.info("User added %s to the Mirroring Fix", label)
+            self.set_status(f"{label} added to the Mirroring Fix (ignored unless it really "
+                            f"plays sound). Click Save Settings to keep it.")
+        else:
+            apps = list(self.config.get("excluded_apps", []))
+            for n in names:
+                if n not in apps:
+                    apps.append(n)
+                    self.exclude_listbox.insert(tk.END, n)
+            self.config["excluded_apps"] = apps
+            log.info("User excluded %s", label)
+            self.set_status(f"{label} added to Exclude Apps. Click Save Settings to keep it.")
+
+    # ── tray ──
 
     def _build_tray(self):
-        icon_image = create_tray_icon()
-        menu = pystray.Menu(
-            pystray.MenuItem("Open Settings", self._tray_open, default=True),
-            pystray.MenuItem("Stop Monitoring", self._tray_toggle),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit", self._tray_quit),
-        )
-        self.tray = pystray.Icon("SilencePlayer", icon_image, "Silence Player", menu)
-        self.tray.run()
+        try:
+            icon_image = create_tray_icon()
+            menu = pystray.Menu(
+                pystray.MenuItem("Open Settings", self._tray_open, default=True),
+                pystray.MenuItem(
+                    lambda item: "Stop Monitoring" if self.monitoring else "Start Monitoring",
+                    self._tray_toggle),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Quit", self._tray_quit),
+            )
+            self.tray = pystray.Icon("SilencePlayer", icon_image, "Silence Player", menu)
+            self.tray.run()
+        except Exception:
+            log.exception("System tray icon failed")
+            # Without a tray icon the user could never reopen a hidden window.
+            self.call_in_ui(self._show_window)
+
+    def _refresh_tray_menu(self):
+        tray = self.tray
+        if tray is not None:
+            try:
+                tray.update_menu()
+            except Exception:
+                log.debug("Tray menu refresh failed", exc_info=True)
 
     def _tray_open(self, icon=None, item=None):
-        self.root.after(0, self._show_window)
+        self.call_in_ui(self._show_window)
 
     def _tray_toggle(self, icon=None, item=None):
-        self.root.after(0, self._toggle_monitoring)
+        self.call_in_ui(self._toggle_monitoring)
 
     def _tray_quit(self, icon=None, item=None):
-        self.monitor.stop()
-        self.player.stop()
-        self._stop_discord_fix()
-        save_config(self.config)
-        if self.tray:
-            self.tray.stop()
-        self.root.after(0, self.root.destroy)
+        self.call_in_ui(self._quit)
+
+    # ── window ──
 
     def _show_window(self):
         self.root.deiconify()
         self.root.lift()
         self.root.focus_force()
 
-    def _hide_window(self):
-        save_config(self.config)
+    def _on_window_close(self):
+        """The X button hides to tray. Nothing is saved (see _save_settings)."""
+        if self._commit_inputs():
+            self._revert_invalid_fields()   # invalid typed values never applied
         self.root.withdraw()
+
+    def _quit(self):
+        if self._quitting:
+            return
+        self._quitting = True
+        log.info("Quit requested")
+        self.monitoring = False
+        self.root.withdraw()
+
+        def shutdown():
+            try:
+                self.monitor.stop(wait=True)
+                self.player.shutdown()
+                self._stop_mirror_fix(wait=True)
+            except Exception:
+                log.exception("Error during shutdown")
+            finally:
+                if self.tray:
+                    try:
+                        self.tray.stop()
+                    except Exception:
+                        log.warning("Stopping tray icon failed", exc_info=True)
+                self.call_in_ui(self._finish_quit)
+
+        threading.Thread(target=shutdown, daemon=True, name="Shutdown").start()
+
+    def _finish_quit(self):
+        self._ui_alive = False
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
+    # ── UI construction ──
 
     def _build_ui(self):
         BG     = "#1e1e2e"
@@ -626,6 +2223,8 @@ class App:
         ACC    = "#89b4fa"
         BTN_BG = "#313244"
         DIM    = "#a6adc8"
+        self._FG = FG
+        self._ERR = "#f38ba8"
 
         def label(parent, text, size=10, bold=False, color=FG):
             return tk.Label(parent, text=text, bg=parent["bg"], fg=color,
@@ -670,7 +2269,7 @@ class App:
                 self.tab_advanced.pack(fill="both", expand=True)
                 self.tab_btn_advanced.config(bg=ACC, fg="#1e1e2e")
 
-        self.tab_btn_main = tk.Button(tab_bar, text="Settings",
+        self.tab_btn_main = tk.Button(tab_bar, text="Player",
                                       command=lambda: switch_tab("main"),
                                       relief="flat", font=("Segoe UI", 10, "bold"),
                                       padx=16, pady=5, cursor="hand2",
@@ -697,10 +2296,35 @@ class App:
 
         self.tab_main.pack(fill="both", expand=True)
 
+        status_frame = tk.Frame(self.root, bg="#181825")
+        status_frame.pack(fill="x", side="bottom")
+
+        # One-click fix for an app that seems to mirror our sound (hidden until needed).
+        self.suggest_row = tk.Frame(status_frame, bg="#313244", padx=10, pady=6)
+        self.suggest_label = tk.Label(self.suggest_row, bg="#313244", fg=FG,
+                                      font=("Segoe UI", 9), wraplength=490, justify="left")
+        self.suggest_label.pack(anchor="w")
+        suggest_buttons = tk.Frame(self.suggest_row, bg="#313244")
+        suggest_buttons.pack(anchor="w", pady=(4, 0))
+        self.suggest_btn = tk.Button(suggest_buttons, text="Treat as mirroring app",
+                                     command=self._accept_mirror_suggestion,
+                                     bg=ACC, fg="#1e1e2e", relief="flat",
+                                     font=("Segoe UI", 9, "bold"), padx=10, pady=3,
+                                     cursor="hand2")
+        self.suggest_btn.pack(side="left")
+        tk.Button(suggest_buttons, text="Dismiss", command=self._dismiss_mirror_suggestion,
+                  bg=BTN_BG, fg=DIM, relief="flat", font=("Segoe UI", 9, "bold"),
+                  padx=10, pady=3, cursor="hand2").pack(side="left", padx=(6, 0))
+
         self.status_var = tk.StringVar(value=self._status)
-        tk.Label(self.root, textvariable=self.status_var,
-                 bg="#181825", fg=DIM,
-                 font=("Segoe UI", 9), pady=8, wraplength=500).pack(fill="x", side="bottom")
+        self.status_label = tk.Label(status_frame, textvariable=self.status_var,
+                                     bg="#181825", fg=DIM,
+                                     font=("Segoe UI", 9), pady=8, padx=52, wraplength=400)
+        self.status_label.pack(fill="x")
+        # Version number, tucked away bottom-left (handy for bug reports).
+        tk.Label(status_frame, text=f"v{APP_VERSION}", bg="#181825", fg="#585b70",
+                 font=("Segoe UI", 8)).place(in_=self.status_label, relx=0, rely=0.5,
+                                             x=10, anchor="w")
 
     def _build_main_tab(self, parent, BG, CARD, FG, ACC, BTN_BG, DIM, label, entry, button):
         mode_frame = tk.Frame(parent, bg=BG)
@@ -739,8 +2363,9 @@ class App:
         single_card = tk.Frame(parent, bg=CARD, padx=16, pady=12)
         label(single_card, "Ambient Sound File (MP3, OPUS, M4A, FLAC, MP4)", bold=True).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
-        self.mp3_var = tk.StringVar(value=self.config["mp3_path"])
-        entry(single_card, self.mp3_var, width=22).grid(row=1, column=0, sticky="w")
+        self.mp3_var = tk.StringVar()
+        self.mp3_entry = self._path_field(single_card, self.mp3_var, self._browse_mp3, BTN_BG, FG)
+        self.mp3_entry.grid(row=1, column=0, sticky="w")
         button(single_card, "Browse", self._browse_mp3).grid(row=1, column=1, padx=(6, 10))
 
         self.single_loop_var = tk.StringVar(value=self.config.get("single_loop_mode", "loop"))
@@ -773,8 +2398,10 @@ class App:
         playlist_card = tk.Frame(parent, bg=CARD, padx=16, pady=12)
         label(playlist_card, "Ambient Sound Playlist (Folder)", bold=True).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
-        self.playlist_var = tk.StringVar(value=self.config.get("playlist_folder", ""))
-        entry(playlist_card, self.playlist_var, width=22).grid(row=1, column=0, sticky="w")
+        self.playlist_var = tk.StringVar()
+        self.playlist_entry = self._path_field(playlist_card, self.playlist_var,
+                                               self._browse_playlist, BTN_BG, FG)
+        self.playlist_entry.grid(row=1, column=0, sticky="w")
         button(playlist_card, "Browse", self._browse_playlist).grid(row=1, column=1, padx=(6, 10))
 
         self.playlist_loop_var = tk.StringVar(value=self.config.get("playlist_loop_mode", "loop_playlist"))
@@ -815,8 +2442,16 @@ class App:
 
         label(shared_card, "Silence Timeout (seconds)", bold=True).grid(row=0, column=0, sticky="w")
         label(shared_card, "Max Volume (0-100)",         bold=True).grid(row=0, column=1, sticky="w", padx=(20, 0))
-        entry(shared_card, self.silence_var, width=12).grid(row=1, column=0, sticky="w", pady=(2, 8))
-        entry(shared_card, self.vol_var,     width=12).grid(row=1, column=1, sticky="w", padx=(20, 0), pady=(2, 8))
+        self.silence_entry = entry(shared_card, self.silence_var, width=12)
+        self.silence_entry.grid(row=1, column=0, sticky="w", pady=(2, 8))
+        self.vol_entry = entry(shared_card, self.vol_var, width=12)
+        self.vol_entry.grid(row=1, column=1, sticky="w", padx=(20, 0), pady=(2, 8))
+
+        # Typed values are committed when the field loses focus or Enter is pressed
+        # (and when the window is closed), so "settings save automatically" holds.
+        for widget in (self.silence_entry, self.vol_entry):
+            widget.bind("<FocusOut>", lambda e: self._commit_inputs_quietly())
+            widget.bind("<Return>",   lambda e: self._commit_inputs_quietly())
 
         fade_row = tk.Frame(shared_card, bg=CARD)
         fade_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
@@ -879,6 +2514,42 @@ class App:
         button(btn_frame, "Save Settings", self._save_settings, color="#f9e2af").pack(side="left", padx=6)
 
         _refresh_mode()
+        self._refresh_path_fields()
+
+    def _path_field(self, parent, var, on_click, bg, fg):
+        """File/folder name (scrolls if too long); click to choose, hover for the full path."""
+        field = MarqueeLabel(parent, var, width_chars=22, bg=bg, fg=fg, on_click=on_click)
+        field.bind("<Enter>", lambda e: self._show_path_tip(field), add="+")
+        field.bind("<Leave>", lambda e: self._hide_path_tip(), add="+")
+        return field
+
+    def _refresh_path_fields(self):
+        file_path = self.config.get("mp3_path", "")
+        folder = self.config.get("playlist_folder", "")
+        self.mp3_var.set(display_name(file_path) or "Click to choose a file…")
+        self.playlist_var.set(display_name(folder) or "Click to choose a folder…")
+        self._path_tips = {self.mp3_entry: file_path, self.playlist_entry: folder}
+
+    def _show_path_tip(self, field):
+        self._hide_path_tip()
+        full = getattr(self, "_path_tips", {}).get(field)
+        if not full:
+            return
+        tip = tk.Toplevel(self.root)
+        tip.wm_overrideredirect(True)
+        tip.wm_geometry(f"+{field.winfo_rootx()}+{field.winfo_rooty() + field.winfo_height() + 4}")
+        tk.Label(tip, text=os.path.normpath(full), bg="#313244", fg="#cdd6f4",
+                 font=("Segoe UI", 9), padx=8, pady=4, relief="solid", bd=1).pack()
+        self._path_tip = tip
+
+    def _hide_path_tip(self):
+        tip = getattr(self, "_path_tip", None)
+        if tip is not None:
+            try:
+                tip.destroy()
+            except Exception:
+                pass
+            self._path_tip = None
 
     def _build_exclude_tab(self, parent, BG, CARD, FG, ACC, BTN_BG, DIM):
         card = tk.Frame(parent, bg=CARD, padx=16, pady=12)
@@ -920,11 +2591,9 @@ class App:
                  font=("Segoe UI", 8)).pack(side="left", padx=(6, 0))
 
         def add_app():
-            name = self.exclude_entry_var.get().strip().lower()
+            name = normalize_app_name(self.exclude_entry_var.get())
             if not name:
                 return
-            if not name.endswith(".exe"):
-                name += ".exe"
             if name in list(self.exclude_listbox.get(0, tk.END)):
                 return
             self.exclude_listbox.insert(tk.END, name)
@@ -952,77 +2621,137 @@ class App:
         add_entry.bind("<Return>", lambda e: add_app())
 
     def _build_advanced_tab(self, parent, BG, CARD, FG, ACC, BTN_BG, DIM):
+        self._DIM, self._GOOD = DIM, "#a6e3a1"
         tk.Label(parent, text="Advanced Settings", bg=BG, fg=ACC,
-                 font=("Segoe UI", 12, "bold")).pack(pady=(16, 2))
-        tk.Label(parent, text="Experimental features — may behave unexpectedly.",
-                 bg=BG, fg=DIM, font=("Segoe UI", 9)).pack(pady=(0, 12))
+                 font=("Segoe UI", 12, "bold")).pack(pady=(12, 2))
+        tk.Label(parent, text="Fixes for apps that confuse silence detection.",
+                 bg=BG, fg=DIM, font=("Segoe UI", 9)).pack(pady=(0, 8))
 
-        card = tk.Frame(parent, bg=CARD, padx=16, pady=14)
+        card = tk.Frame(parent, bg=CARD, padx=16, pady=12)
         card.pack(fill="x", padx=24, pady=4)
 
         title_row = tk.Frame(card, bg=CARD)
         title_row.pack(fill="x")
-
-        tk.Label(title_row, text="Discord Mirroring Fix",
+        tk.Label(title_row, text="Mirroring Fix",
                  bg=CARD, fg=FG, font=("Segoe UI", 10, "bold")).pack(side="left")
-        tk.Label(title_row, text="EXPERIMENTAL",
-                 bg="#f38ba8", fg="#1e1e2e",
-                 font=("Segoe UI", 8, "bold"),
-                 padx=6, pady=2).pack(side="left", padx=(8, 0))
 
-        self.mirror_fix_var = tk.BooleanVar(value=self.config.get("discord_mirror_fix", False))
-        mirror_status = tk.Label(card, bg=CARD, font=("Segoe UI", 9, "bold"))
+        self.mirror_fix_var = tk.BooleanVar(value=self.config.get("mirror_fix_enabled", True))
+        self.mirror_status = tk.Label(card, bg=CARD, font=("Segoe UI", 9, "bold"))
 
         def toggle_mirror_fix():
-            v = self.mirror_fix_var.get()
-            self.config["discord_mirror_fix"] = v
-            mirror_btn.config(
-                bg="#a6e3a1" if v else BTN_BG,
-                fg="#1e1e2e" if v else DIM,
-                text="Enabled" if v else "Disabled")
-            if v:
-                self._start_discord_fix()
-                mirror_status.config(
-                    text="● Active — monitoring Discord's output stream",
-                    fg="#a6e3a1")
-            else:
-                self._stop_discord_fix()
-                mirror_status.config(text="● Off", fg=DIM)
-            save_config(self.config)
+            self.mirror_fix_var.set(not self.mirror_fix_var.get())
+            self.config["mirror_fix_enabled"] = bool(self.mirror_fix_var.get())
+            self._apply_mirror_state()
+            self._refresh_mirror_ui()
 
-        mirror_btn = tk.Button(title_row,
-                               command=lambda: [
-                                   self.mirror_fix_var.set(not self.mirror_fix_var.get()),
-                                   toggle_mirror_fix()],
-                               relief="flat", font=("Segoe UI", 9, "bold"),
-                               padx=12, pady=4, cursor="hand2")
-        mirror_btn.pack(side="right")
+        self.mirror_btn = tk.Button(title_row, command=toggle_mirror_fix,
+                                    relief="flat", font=("Segoe UI", 9, "bold"),
+                                    padx=12, pady=4, cursor="hand2")
+        self.mirror_btn.pack(side="right")
 
         tk.Label(card,
-                 text="When Discord streams your desktop, it captures your\n"
-                      "ambient sound and shows a fake peak in the mixer.\n\n"
-                      "This fix taps Discord's actual speaker output directly.\n"
-                      "If Discord outputs nothing → it's only capturing → ignored.\n"
-                      "If Discord outputs audio → real sound → ambient stops.",
+                 text="Some apps listen to your PC's sound and show a fake level in\n"
+                      "the Windows mixer (Discord while streaming, SignalRGB,\n"
+                      "Wallpaper Engine). For the apps below, Silence Player checks\n"
+                      "whether they really make sound, and ignores them when\n"
+                      "they're only reacting to your ambient sound.",
                  bg=CARD, fg=DIM, font=("Segoe UI", 9),
-                 justify="left").pack(anchor="w", pady=(8, 6))
+                 justify="left").pack(anchor="w", pady=(6, 6))
 
-        mirror_status.pack(anchor="w")
+        list_frame = tk.Frame(card, bg=CARD)
+        list_frame.pack(fill="x")
+        scrollbar = tk.Scrollbar(list_frame)
+        scrollbar.pack(side="right", fill="y")
+        self.mirror_listbox = tk.Listbox(
+            list_frame, yscrollcommand=scrollbar.set,
+            bg=BTN_BG, fg=FG, selectbackground=ACC, selectforeground="#1e1e2e",
+            relief="flat", font=("Segoe UI", 10), height=5, borderwidth=0,
+            activestyle="none")
+        self.mirror_listbox.pack(fill="x", expand=True)
+        scrollbar.config(command=self.mirror_listbox.yview)
 
-        v = self.mirror_fix_var.get()
-        mirror_btn.config(
-            bg="#a6e3a1" if v else BTN_BG,
-            fg="#1e1e2e" if v else DIM,
-            text="Enabled" if v else "Disabled")
-        mirror_status.config(
-            text="● Active — monitoring Discord's output stream" if v else "● Off",
-            fg="#a6e3a1" if v else DIM)
-        if v:
-            self._start_discord_fix()
+        def selected_name():
+            sel = self.mirror_listbox.curselection()
+            if not sel:
+                return None
+            apps = _coerce_mirror_apps(self.config.get("mirror_apps", []))
+            return apps[sel[0]]["name"] if sel[0] < len(apps) else None
+
+        def toggle_selected(event=None):
+            name = selected_name()
+            if name is None:
+                return
+            apps = _coerce_mirror_apps(self.config.get("mirror_apps", []))
+            current = next(a["enabled"] for a in apps if a["name"] == name)
+            self._set_mirror_app(name, not current)
+            self._apply_mirror_state()
+            self._refresh_mirror_ui(select=name)
+
+        def remove_selected():
+            name = selected_name()
+            if name is None:
+                return
+            self.config["mirror_apps"] = [a for a in _coerce_mirror_apps(
+                self.config.get("mirror_apps", [])) if a["name"] != name]
+            self._apply_mirror_state()
+            self._refresh_mirror_ui()
+
+        def add_app(event=None):
+            name = normalize_app_name(self.mirror_entry_var.get())
+            if not name:
+                return
+            self._set_mirror_app(name, True)
+            self.mirror_entry_var.set("")
+            self._apply_mirror_state()
+            self._refresh_mirror_ui(select=name)
+
+        self.mirror_listbox.bind("<Double-Button-1>", toggle_selected)
+
+        add_row = tk.Frame(card, bg=CARD)
+        add_row.pack(fill="x", pady=(6, 0))
+        self.mirror_entry_var = tk.StringVar()
+        add_entry = tk.Entry(add_row, textvariable=self.mirror_entry_var,
+                             bg=BTN_BG, fg=FG, insertbackground=FG,
+                             relief="flat", font=("Segoe UI", 10), bd=6, width=18)
+        add_entry.pack(side="left")
+        add_entry.bind("<Return>", add_app)
+        for text, cmd, color in (("Add", add_app, ACC),
+                                 ("On / Off", toggle_selected, FG),
+                                 ("Remove", remove_selected, "#f38ba8")):
+            tk.Button(add_row, text=text, command=cmd, bg=BTN_BG, fg=color,
+                      relief="flat", font=("Segoe UI", 9, "bold"), padx=10, pady=4,
+                      cursor="hand2").pack(side="left", padx=(6, 0))
+
+        self.mirror_status.pack(anchor="w", pady=(8, 0))
+
+        self._refresh_mirror_ui()
+        self._apply_mirror_state()
+
+    def _refresh_mirror_ui(self, select=None):
+        on = bool(self.mirror_fix_var.get())
+        self.mirror_btn.config(bg=self._GOOD if on else "#313244",
+                               fg="#1e1e2e" if on else self._DIM,
+                               text="Enabled" if on else "Disabled")
+        apps = _coerce_mirror_apps(self.config.get("mirror_apps", []))
+        self.mirror_listbox.delete(0, tk.END)
+        for i, a in enumerate(apps):
+            self.mirror_listbox.insert(tk.END, f"{'●' if a['enabled'] else '○'}  {a['name']}"
+                                       + ("" if a["enabled"] else "   (off)"))
+            if a["name"] == select:
+                self.mirror_listbox.selection_set(i)
+        count = sum(1 for a in apps if a["enabled"])
+        if on and PROCTAP_IMPORT_ERROR is not None:
+            self.mirror_status.config(
+                text="● Unavailable — ProcTap could not be loaded (see log)", fg="#f38ba8")
+        elif on:
+            self.mirror_status.config(
+                text=f"● Active — checking {count} app{'s' if count != 1 else ''}",
+                fg=self._GOOD)
+        else:
+            self.mirror_status.config(text="● Off", fg=self._DIM)
 
     def _sync_excluded_apps(self):
         self.config["excluded_apps"] = list(self.exclude_listbox.get(0, tk.END))
-        save_config(self.config)
 
     def _browse_mp3(self):
         path = filedialog.askopenfilename(
@@ -1030,107 +2759,157 @@ class App:
             filetypes=[("Audio files", "*.mp3 *.opus *.m4a *.flac *.mp4"),
                        ("All files", "*.*")])
         if path:
-            self.mp3_var.set(path)
             self.config["mp3_path"] = path
+            self._refresh_path_fields()
 
     def _browse_playlist(self):
         folder = filedialog.askdirectory(title="Select folder with audio files")
         if folder:
-            self.playlist_var.set(folder)
             self.config["playlist_folder"] = folder
+            self._refresh_path_fields()
 
     def _save_settings(self):
-        if not self._read_inputs():
+        errors = self._commit_inputs()
+        if errors:
+            messagebox.showerror("Invalid settings", "\n\n".join(errors), parent=self.root)
             return
-        save_config(self.config)
-        self.set_status("Settings saved!")
+        if self._save_now():
+            self.set_status("Settings saved!")
+        else:
+            self.set_status("Could not save settings — see the log file for details.")
 
-    def _read_inputs(self):
+    # ── typed inputs ──
+
+    def _commit_inputs(self):
+        """Copy UI values into self.config. Valid values are applied; invalid
+        ones are left out and returned as user-facing messages."""
+        errors = []
         try:
-            silence = int(self.silence_var.get())
-            vol     = int(self.vol_var.get())
-            assert 1 <= silence <= 3600
-            assert 0 <= vol <= 100
-        except (ValueError, AssertionError) as e:
-            messagebox.showerror("Invalid input", str(e))
-            return False
-        self.config["mp3_path"]           = self.mp3_var.get()
-        self.config["playlist_folder"]    = self.playlist_var.get()
-        self.config["silence_seconds"]    = silence
-        self.config["max_volume"]         = vol
-        self.config["fade_enabled"]       = self.fade_enabled_var.get()
+            self.config["silence_seconds"] = parse_int_field(
+                self.silence_var.get(), "Silence Timeout", SILENCE_MIN, SILENCE_MAX, "seconds")
+            self.silence_entry.config(fg=self._FG)
+        except ValidationError as e:
+            errors.append(str(e))
+            self.silence_entry.config(fg=self._ERR)
+        try:
+            self.config["max_volume"] = parse_int_field(
+                self.vol_var.get(), "Max Volume", VOLUME_MIN, VOLUME_MAX)
+            self.vol_entry.config(fg=self._FG)
+        except ValidationError as e:
+            errors.append(str(e))
+            self.vol_entry.config(fg=self._ERR)
+
+        # File/folder paths are set by Browse (the fields only show names).
+
+        self.config["fade_enabled"]       = bool(self.fade_enabled_var.get())
         self.config["mode"]               = self.mode_var.get()
         self.config["single_loop_mode"]   = self.single_loop_var.get()
         self.config["playlist_loop_mode"] = self.playlist_loop_var.get()
-        self.config["duck_percent"]       = self.duck_var.get()
-        return True
+        self.config["duck_percent"]       = int(self.duck_var.get())
+        return errors
+
+    def _commit_inputs_quietly(self):
+        errors = self._commit_inputs()
+        if errors:
+            self.set_status(errors[0])
+
+    def _revert_invalid_fields(self):
+        self.silence_var.set(str(self.config["silence_seconds"]))
+        self.vol_var.set(str(self.config["max_volume"]))
+        self.silence_entry.config(fg=self._FG)
+        self.vol_entry.config(fg=self._FG)
+
+    # ── monitoring ──
+
+    def _set_monitoring_ui(self, on):
+        if on:
+            self.start_btn.config(text="Stop Monitoring", fg="#f38ba8")
+        else:
+            self.start_btn.config(text="Start Monitoring", fg="#a6e3a1")
+        self._refresh_tray_menu()
 
     def _start_monitoring(self):
         self.monitoring = True
         self.monitor.start()
-        self.start_btn.config(text="Stop Monitoring", fg="#f38ba8")
+        self._set_monitoring_ui(True)
 
     def _toggle_monitoring(self):
         if self.monitoring:
             self.monitoring = False
             self.monitor.stop()
-            self.player.stop()
+            self.player.stop()          # fades out on the playback thread
             self.set_status("Monitoring stopped.")
-            self.start_btn.config(text="Start Monitoring", fg="#a6e3a1")
-        else:
-            if not self._read_inputs():
-                return
-            mode = self.config["mode"]
-            if mode == "single" and not os.path.exists(self.config["mp3_path"]):
-                messagebox.showerror("No file", "Please select a valid audio file first.")
-                return
-            if mode == "playlist" and not os.path.isdir(self.config["playlist_folder"]):
-                messagebox.showerror("No folder", "Please select a valid playlist folder first.")
-                return
-            self.monitoring = True
-            self.monitor.start()
-            self.set_status("Monitoring... waiting for silence.")
-            self.start_btn.config(text="Stop Monitoring", fg="#f38ba8")
+            self._set_monitoring_ui(False)
+            return
+
+        errors = self._commit_inputs()
+        problem = validate_ambient_source(self.config)
+        if problem:
+            errors.append(problem)
+        if errors:
+            self._show_window()
+            messagebox.showerror("Can't start monitoring", "\n\n".join(errors), parent=self.root)
+            return
+        self._start_monitoring()
+        self.set_status("Monitoring... waiting for silence.")
+
+    def on_monitor_auto_stopped(self, reason):
+        """Called from the monitor thread when it stops itself."""
+        self.call_in_ui(self._handle_auto_stop, reason)
+
+    def _handle_auto_stop(self, reason):
+        if self.monitor.running:
+            return   # the user already started monitoring again
+        self.monitoring = False
+        self._set_monitoring_ui(False)
+        self.set_status(reason)
+
+    # ── called by the monitor thread ──
 
     def play_ambient(self):
         self.set_status("Silence reached — playing ambient sound...")
-        self.player.play(self.config)
+        return self.player.play(self.config)
 
     def duck_ambient(self, target_vol):
-        threading.Thread(target=self.player.duck, args=(target_vol,), daemon=True).start()
+        self.player.duck(target_vol)
 
     def unduck_ambient(self, target_vol):
-        threading.Thread(target=self.player.unduck, args=(target_vol,), daemon=True).start()
+        self.player.unduck(target_vol)
 
     def stop_ambient(self):
         self.player.stop()
 
-    def stop_monitoring(self):
-        self.monitoring = False
-        self.monitor.stop()
-        self.set_status("Playback finished — monitoring stopped.")
-        try:
-            self.root.after(0, lambda: self.start_btn.config(
-                text="Start Monitoring", fg="#a6e3a1"))
-        except Exception:
-            pass
 
-    def set_status(self, msg, error=False):
-        self._status = msg
-        try:
-            self.root.after(0, lambda: self.status_var.set(msg))
-        except Exception:
-            pass
+def main():
+    setup_logging()
+    install_exception_hooks()
+    log.info("Silence Player %s starting (python %s, frozen=%s)",
+             APP_VERSION, sys.version.split()[0], hasattr(sys, "_MEIPASS"))
+    if PROCTAP_IMPORT_ERROR is not None:
+        log.warning("ProcTap unavailable; Mirroring Fix disabled: %s", PROCTAP_IMPORT_ERROR)
 
-    def _on_close(self):
-        self.monitor.stop()
-        self.player.stop()
-        self._stop_discord_fix()
-        save_config(self.config)
-        self.root.destroy()
+    instance = SingleInstance()
+    if not instance.acquire():
+        log.info("Another instance is already running; asked it to open Settings")
+        return 0
+    try:
+        root = tk.Tk()
+        try:
+            App(root, instance)
+        except Exception as e:
+            log.critical("Startup failed", exc_info=True)
+            root.withdraw()
+            messagebox.showerror(
+                "Silence Player could not start",
+                f"{e}\n\nDetails were written to:\n{os.path.join(log_dir(), 'silenceplayer.log')}")
+            root.destroy()
+            return 1
+        root.mainloop()
+    finally:
+        instance.release()
+        log.info("Silence Player exited")
+    return 0
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = App(root)
-    root.mainloop()
+    sys.exit(main())
