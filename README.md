@@ -31,7 +31,7 @@
 - 💬 Mirroring Fix for Discord, SignalRGB, Wallpaper Engine and more
 - 🖥️ Runs quietly in the Windows system tray
 - 💾 Saves your settings when you click Save Settings
-- 🎧 Supports MP3, M4A, FLAC and MP4
+- 🎧 Supports MP3, M4A, OPUS, FLAC and MP4
 
 ## 💡 How it works
 
