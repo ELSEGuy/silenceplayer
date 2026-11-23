@@ -1,0 +1,4 @@
+# Build and test tools (in addition to requirements.txt)
+pyinstaller==6.19.0
+pyinstaller-hooks-contrib==2026.1
+pytest==9.0.2
