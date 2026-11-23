@@ -1,0 +1,6 @@
+# Silence Player is built as a Windows EXE (see silenceplayer.spec / build.ps1),
+# not installed as a package. This file only holds tool configuration.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
