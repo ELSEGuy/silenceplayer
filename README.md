@@ -28,9 +28,9 @@
 - 🦆 Duck ambient audio when external audio is detected
 - 🔁 Loop, stop, and playlist looping modes
 - 🚫 Exclude specific applications from audio detection
-- 💬 Experimental Discord Mirroring Fix
+- 💬 Mirroring Fix for Discord, SignalRGB, Wallpaper Engine and more
 - 🖥️ Runs quietly in the Windows system tray
-- 💾 Saves your settings automatically
+- 💾 Saves your settings when you click Save Settings
 - 🎧 Supports MP3, M4A, FLAC and MP4
 - 🚧 OPUS support is a work in progress
 
@@ -68,15 +68,15 @@ If you use a packaged release, you do not need to install Python manually.
 
 Playback is powered by VLC.
 
-## 💬 Discord Mirroring Fix
+## 💬 Mirroring Fix
 
-Silence Player includes an **experimental Discord Mirroring Fix**.
+Some apps listen to everything your PC plays and show a fake level in the Windows mixer while doing it, without making any sound themselves. Discord does this while streaming; audio-reactive apps like SignalRGB and Wallpaper Engine do it all the time. Without help, Silence Player would see them "playing" the moment your ambient sound starts, and stop it.
 
-Discord can expose audio sessions used for screen sharing or audio capture even when they are not actually producing audible sound. Silence Player can use per-process audio monitoring to better distinguish real Discord audio from mirrored sessions.
+The Mirroring Fix (on by default, in the **Advanced** tab) checks what these apps really output. If they make real sound (someone talks on Discord, a video wallpaper has audio), Silence Player reacts as usual. If they're only reacting to your sound, they're ignored.
 
-For now, this experimental fix only targets **Discord**. Broader support for common recording and streaming software is planned for a future version.
+It comes with Discord, SignalRGB and Wallpaper Engine on the list, and you can add any other app. If an app starts "playing" right after your ambient sound does, Silence Player notices and offers to add it in one click.
 
-> This feature is experimental and may not work perfectly on every setup.
+> Needs Windows 10 20H1 or later. If the check can't run on a PC, those apps simply count as playing, like before.
 
 ## 🚧 Silence Player 2.0
 
@@ -91,19 +91,57 @@ A larger **2.0 update** is planned with a complete UX/UI redesign and refreshed 
 - [ ] Improved settings experience
 - [ ] Cleaner application architecture
 - [ ] Improved installation experience
-- [ ] Broader recording and streaming software support for mirroring detection
 - [ ] General usability improvements
 
 The current version will remain available while 2.0 is being developed.
+
+## 🩺 Settings and logs
+
+- Changes apply right away. Click **Save Settings** to keep them: they are saved to
+  `config.json` next to `silenceplayer.exe`, and only then.
+  If that file is ever damaged, Silence Player keeps a copy as
+  `config.json.corrupt-<date>` and starts with default settings.
+- A diagnostic log is written to `%LOCALAPPDATA%\SilencePlayer\silenceplayer.log`
+  (rotated at 1 MB, last 3 kept). It never contains audio. If something misbehaves,
+  this file is the most useful thing to attach to an issue.
+- Only one Silence Player runs at a time. Launching it again opens the Settings
+  window of the copy that is already running.
+
+## 🛠️ Building from source
+
+Requirements: Windows 10 20H1 or later (x64) and Python 3.12.
+
+```powershell
+git clone https://github.com/ELSEGuy/silenceplayer
+cd silenceplayer
+powershell -ExecutionPolicy Bypass -File build.ps1
+```
+
+`build.ps1` creates a clean `.venv-build`, installs the pinned versions from
+`requirements.txt` and `requirements-dev.txt`, runs the tests, and builds
+`dist\silenceplayer.exe` with `silenceplayer.spec`. It prints the size and SHA-256
+and writes the exact package versions to `dist\build-freeze.txt`.
+
+The VLC engine is **not** downloaded during the build. The repo contains the exact
+copy it comes from: `libvlc.dll`, `libvlccore.dll` and `plugins\` from
+**VLC 3.0.23 (x64)**. Only the plugins needed for local audio playback are bundled
+(listed in `silenceplayer.spec`); the repo keeps the full set.
+
+To run from source instead: `pip install -r requirements.txt`, then `python app.py`.
+Tests: `pip install -r requirements-dev.txt`, then `python -m pytest`. The tests use
+fakes for VLC and the Windows audio APIs, so they run anywhere.
 
 ## 🧩 Built with
 
 Silence Player uses several open-source projects:
 
-- [ProcTap](https://github.com/m96-chan/ProcTap) — per-process audio capture
-- [python-vlc](https://github.com/oaubert/python-vlc) — VLC audio playback
-- [pycaw](https://github.com/AndreMiras/pycaw) — Windows audio session monitoring
+- [ProcTap](https://github.com/m96-chan/ProcTap) — per-process audio capture (needs NumPy and SciPy)
+- [python-vlc](https://github.com/oaubert/python-vlc) and [VLC](https://www.videolan.org/) — audio playback
+- [pycaw](https://github.com/AndreMiras/pycaw) — Windows audio session monitoring (with comtypes and psutil)
 - [pystray](https://github.com/moses-palmer/pystray) — system tray integration
+- [Pillow](https://python-pillow.org/) — tray icon images
+- [NumPy](https://numpy.org/) — audio level analysis for the Mirroring Fix
+- [PyInstaller](https://pyinstaller.org/) — packaging
 
 ## 📜 License
 
