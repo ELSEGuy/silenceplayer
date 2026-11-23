@@ -1,0 +1,24 @@
+# Silence Player runtime dependencies (Windows 10 20H1+ x64, Python 3.12).
+#
+# Pinned to the releases that were current when v1.3-beta was built
+# (March 2026) so a fresh clone builds the same thing. Upgrade deliberately:
+# change a pin, rebuild, and test playback, ducking and the Discord fix.
+
+# Audio session monitoring (pycaw needs comtypes + psutil)
+pycaw==20251023
+comtypes==1.4.15
+psutil==7.2.2
+
+# Playback. python-vlc is only the binding; the VLC engine itself is the
+# bundled libvlc.dll / libvlccore.dll / plugins/ (VLC 3.0.23 x64) in this repo.
+python-vlc==3.0.21203
+
+# System tray (pystray needs Pillow + six)
+pystray==0.19.5
+six==1.17.0
+pillow==12.1.1
+
+# Discord Mirroring Fix: per-process capture (ships a native .pyd; needs scipy)
+proc-tap==1.0.3
+scipy==1.17.1
+numpy==2.4.2

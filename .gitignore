@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv*/
+build/
+dist/
+
+# Local settings written next to app.py / the EXE
+config.json
+config.json.corrupt-*
+.config-*.tmp
+
+# Logs written next to app.py when running from source
+silenceplayer.log*

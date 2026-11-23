@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [master, "v*"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pinned dependencies
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run tests
+        run: python -m pytest -q
+
+  build:
+    # Every push (not PRs) builds the EXE; download it from the run's artifacts.
+    if: github.event_name != 'pull_request'
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        shell: pwsh
+        run: ./build.ps1 -SkipTests
+      - uses: actions/upload-artifact@v4
+        with:
+          name: silenceplayer-exe
+          path: |
+            dist/silenceplayer.exe
+            dist/build-freeze.txt
