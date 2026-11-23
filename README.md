@@ -32,7 +32,6 @@
 - 🖥️ Runs quietly in the Windows system tray
 - 💾 Saves your settings when you click Save Settings
 - 🎧 Supports MP3, M4A, FLAC and MP4
-- 🚧 OPUS support is a work in progress
 
 ## 💡 How it works
 
