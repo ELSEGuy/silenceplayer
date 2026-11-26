@@ -465,3 +465,20 @@ def test_sliders_move_in_steps(appmod, root, cfg_path, fast_timing, monkeypatch)
     assert a.np_vol.cget("resolution") == 5
     assert float(str(a.duck_var.get())) % 10 == 0
     a.monitor.stop(wait=True)
+
+
+
+def test_volume_never_goes_to_zero(appmod, root, cfg_path, fast_timing):
+    import json
+    assert appmod.snap_to_step(0, 5, lowest=5) == 5
+    assert appmod.snap_to_step(2, 5, lowest=5) == 5
+    assert appmod.snap_to_step(8, 5, lowest=5) == 10
+    cfg_path.write_text(json.dumps({"max_volume": 0}))     # saved by an older version
+    a = make_app(appmod, root)
+    assert a.config["max_volume"] == 5 and a.np_vol_label.cget("text") == "5%"
+    a.np_vol.set(30)
+    pump(root, 0.05)
+    a.np_vol.set(0)                                         # dragged all the way left
+    pump(root, 0.05)
+    assert a.config["max_volume"] == 5 and a.np_vol.get() == 5
+    a.monitor.stop(wait=True)

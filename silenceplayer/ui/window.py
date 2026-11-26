@@ -38,16 +38,18 @@ from ..ui.widgets import MarqueeLabel
 from ..updates import RELEASES_URL, UpdateChecker, current_version
 
 
-def snap_to_step(value, step):
+def snap_to_step(value, step, lowest=0):
     """Round a 0-100 setting to the nearest slider step (halves go up), so the
-    slider and the level in use always agree. 47 → 45, 55 → 60 with step 10."""
+    slider and the level in use always agree. 47 → 45, 55 → 60 with step 10.
+    Nothing below `lowest` (the volume slider can't mute)."""
     value = max(0, min(100, int(value)))
-    return min(100, int(value / step + 0.5) * step)
+    return max(lowest, min(100, int(value / step + 0.5) * step))
 
 
 class App:
     WINDOW_W, WINDOW_H = 520, 770
-    VOLUME_STEP = 5                # the volume slider moves 0, 5, 10 … 100
+    VOLUME_STEP = 5                # the volume slider moves 5, 10, 15 … 100
+    VOLUME_LOWEST = 5              # muting makes no sense for the ambient sound
     DUCK_STEP = 10                 # the duck slider: 0 (stop), 10 … 90, 100 (keep playing)
     UI_POLL_MS = 50
 
@@ -898,9 +900,9 @@ class App:
                                      width=4, anchor="e")
         self.np_vol_label.pack(side="right")
         self.config["max_volume"] = snap_to_step(self.config.get("max_volume", 50),
-                                                 self.VOLUME_STEP)
+                                                 self.VOLUME_STEP, self.VOLUME_LOWEST)
         self.np_vol_var = tk.IntVar(value=self.config["max_volume"])
-        self.np_vol = tk.Scale(vol_row, from_=0, to=100, orient="horizontal",
+        self.np_vol = tk.Scale(vol_row, from_=self.VOLUME_LOWEST, to=100, orient="horizontal",
                                variable=self.np_vol_var, command=self._np_volume_changed,
                                resolution=self.VOLUME_STEP,
                                bg=CARD, fg=FG, troughcolor=BTN_BG, activebackground=ACC,

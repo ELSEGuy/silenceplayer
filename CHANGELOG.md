@@ -18,8 +18,8 @@
 - **Live levels.** The volume slider and the "When External Audio Detected"
   level apply to the sound at once, whether it is playing, ducked or paused
   (paused sound resumes at the new level). As before, Save Settings keeps the
-  change. The volume slider moves in steps of 5% and the duck slider
-  in steps of 10% (0% stop, 10–90% duck, 100% keep playing); a saved value
+  change. The volume slider moves in steps of 5% from 5% (it can't
+  mute) and the duck slider in steps of 10% (0% stop, 10–90% duck, 100% keep playing); a saved value
   between steps is rounded to the nearest one.
 - **New tray menu.** Right-clicking the tray icon opens a dark menu in Silence
   Player's own style, headed by what's playing (green), ducked (yellow) or
