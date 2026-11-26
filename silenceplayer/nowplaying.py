@@ -90,6 +90,8 @@ def describe_now_playing(monitoring: bool, info: MonitorInfo | None,
     if info is None:                     # the monitor hasn't looked yet
         return listening()
     phase = info.phase
+    if phase == "ducked" and info.duck_percent >= 100:
+        phase = "playing"                # "Keep Playing (100%)": nothing got quieter
 
     if phase in ("playing", "ducked") and track is not None and track.paused:
         detail, bar = clock_and_bar()

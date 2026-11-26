@@ -478,3 +478,23 @@ def test_paused_sound_cannot_be_mirrored(appmod, make_config):
     mon._tick(state, ev)
     assert app.mirror_fix.asked == [], "nothing to mirror while paused"
     assert state.ducked
+
+
+def test_keep_playing_100_status_says_playing(appmod, make_config):
+    clock = Clock()
+    apps = set()
+    app, mon = make_monitor(appmod, make_config, lambda ex: set(apps), clock=clock,
+                            silence_seconds=5, duck_percent=100)
+    state, ev = appmod._MonitorState(), threading.Event()
+    mon._tick(state, ev)
+    clock.t += 6
+    mon._tick(state, ev)                   # ambient starts
+    clock.t += 10
+    apps.add("discord.exe")
+    mon._tick(state, ev)
+    assert mon.info.phase == "ducked"      # still tracked, so a live change applies
+    assert app.statuses[-1] == "External audio detected (discord.exe) — ambient keeps playing."
+    apps.clear()
+    clock.t += 1
+    mon._tick(state, ev)
+    assert app.statuses[-1] == "Playing ambient sound..."

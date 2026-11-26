@@ -421,3 +421,19 @@ def test_volume_and_duck_apply_live(appmod, root, cfg_path, fast_timing, monkeyp
     assert calls[-1] == ("level", 20)     # still ducked: 25% of 80
     assert not cfg_path.exists(), "live changes are not saved until Save Settings"
     a.monitor.stop(wait=True)
+
+
+def test_keep_playing_100_shows_playing(appmod, cfg):
+    """Duck level 100% means nothing gets quieter: show "Playing", not "Ducked 100%"."""
+    track = appmod.TrackInfo(FILE, 52, 902)
+    for info in ({"apps": ("discord.exe",)}, {"remaining": 7}):
+        now = describe(appmod, cfg, "ducked", track, duck_percent=100, **info)
+        assert now.kind == "playing" and now.badge == "Playing"
+        assert now.detail == "0:52 / 15:02", "no 'back to full volume' at 100%"
+        assert now.menu_head == "Now playing"
+    paused = appmod.TrackInfo(FILE, 52, 902, paused=True)
+    assert describe(appmod, cfg, "ducked", paused, duck_percent=100,
+                    apps=("discord.exe",)).badge == "Paused"
+    # anything below 100% is still a real duck
+    assert describe(appmod, cfg, "ducked", track, duck_percent=99,
+                    apps=("discord.exe",)).badge == "Ducked 99%"

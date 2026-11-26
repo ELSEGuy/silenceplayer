@@ -252,8 +252,11 @@ class AudioMonitor:
                         s.unduck_start = None
                     self.info = MonitorInfo("ducked", apps=apps,
                                             duck_percent=int(settings.duck_percent))
-                    app.set_status(
-                        f"External audio detected — ambient ducked to {int(settings.duck_percent)}%.")
+                    if settings.duck_percent >= 100:
+                        app.set_status(f"External audio detected ({names}) — ambient keeps playing.")
+                    else:
+                        app.set_status(
+                            f"External audio detected — ambient ducked to {int(settings.duck_percent)}%.")
             else:
                 if s.ducked:
                     if s.unduck_start is None:
@@ -262,7 +265,10 @@ class AudioMonitor:
                     if remaining > 0:
                         self.info = MonitorInfo("ducked", remaining=remaining,
                                                 duck_percent=int(settings.duck_percent))
-                        app.set_status(f"Silence returned — fading back up in {remaining:.0f}s")
+                        if settings.duck_percent >= 100:
+                            app.set_status("Playing ambient sound...")
+                        else:
+                            app.set_status(f"Silence returned — fading back up in {remaining:.0f}s")
                     else:
                         s.ducked = False
                         s.unduck_start = None

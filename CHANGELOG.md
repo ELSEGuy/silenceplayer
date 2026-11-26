@@ -6,7 +6,8 @@
 - **Now playing.** A card at the top of the Player tab shows the file that is
   playing, its time and progress, and what Silence Player is doing: playing,
   ducked (and for which app), waiting for silence (with the countdown), or
-  off. Hovering the tray icon shows the same in its tooltip. The window is a
+  off. With "Keep Playing (100%)" it stays "Playing" when other audio starts,
+  since nothing gets quieter. Hovering the tray icon shows the same in its tooltip. The window is a
   little taller to make room.
 - **Seek and volume in Now playing.** Click or drag the progress bar to jump
   through the track. The volume slider under it replaces the Max Volume field
