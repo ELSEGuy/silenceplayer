@@ -20,6 +20,11 @@
 - **Playlist and mode locked while monitoring.** The playlist folder and the
   Single File / Playlist mode can't be changed while monitoring is on (Browse
   and the other mode are greyed out); stop monitoring to change them.
+- **Catppuccin Frappé colours.** The theme moves from Catppuccin Mocha to the
+  softer Frappé flavour, using the official palette and Catppuccin's style
+  guide for each role (Base window, Mantle status bar, Surface cards and
+  controls, Base text on accent colours, Blue/Green/Yellow/Red accents). All
+  colours now live in one place (`ui/theme.py`).
 - **Continuous corners everywhere.** Cards, buttons, tabs, toggles, text
   fields, lists (including the selected row), sliders, the progress bar, the
   status badge and the bottom banners now have Apple-style continuous

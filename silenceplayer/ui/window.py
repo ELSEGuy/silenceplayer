@@ -33,6 +33,7 @@ from ..paths import resource_path
 from ..player import AmbientPlayer
 from ..sources import display_name, validate_ambient_source
 from ..startup import StartupEntry
+from ..ui import theme
 from ..ui.rounded import (
     RADIUS_CARD,
     RADIUS_CONTROL,
@@ -70,7 +71,7 @@ class App:
         self.root.title("Silence Player")
         self.root.geometry(f"{self.WINDOW_W}x{self.WINDOW_H}")
         self.root.resizable(False, False)
-        self.root.configure(bg="#1e1e2e")
+        self.root.configure(bg=theme.BG)
         self.root.protocol("WM_DELETE_WINDOW", self._on_window_close)
         self.root.report_callback_exception = self._report_tk_exception
 
@@ -346,8 +347,8 @@ class App:
 
     def _refresh_update_status(self):
         on = self.config.get("check_updates", True) is not False
-        self.update_toggle.config(bg=self._GOOD if on else "#313244",
-                                  fg="#1e1e2e" if on else "#6c7086",
+        self.update_toggle.config(bg=self._GOOD if on else theme.CONTROL,
+                                  fg=theme.ON_ACCENT if on else theme.SUBTLE,
                                   text="Enabled" if on else "Disabled")
         u = self.updater
         if self._update_info is not None:
@@ -357,7 +358,7 @@ class App:
                     else "● Off — Silence Player won't check GitHub")
             color = self._DIM
         elif u.last_error is not None:
-            text, color = "● Couldn't check (no internet?)", "#f9e2af"
+            text, color = "● Couldn't check (no internet?)", theme.WARNING
         else:
             when = time.strftime("%H:%M", time.localtime(u.last_checked))
             text, color = f"● Up to date (checked at {when})", self._DIM
@@ -514,14 +515,14 @@ class App:
     # ── UI construction ──
 
     def _build_ui(self):
-        BG     = "#1e1e2e"
-        CARD   = "#2a2a3e"
-        FG     = "#cdd6f4"
-        ACC    = "#89b4fa"
-        BTN_BG = "#313244"
-        DIM    = "#a6adc8"
+        BG     = theme.BG
+        CARD   = theme.CARD
+        FG     = theme.TEXT
+        ACC    = theme.ACCENT
+        BTN_BG = theme.CONTROL
+        DIM    = theme.LABEL
         self._FG = FG
-        self._ERR = "#f38ba8"
+        self._ERR = theme.ERROR
 
         def label(parent, text, size=10, bold=False, color=FG):
             return tk.Label(parent, text=text, bg=parent["bg"], fg=color,
@@ -542,7 +543,7 @@ class App:
                              bg=BTN_BG, fg=color, relief="flat",
                              font=("Segoe UI", 10, "bold"),
                              padx=8, pady=5, cursor="hand2",
-                             activebackground="#45475a", activeforeground=color)
+                             activebackground=theme.PRESSED, activeforeground=color)
 
         label(self.root, "Silence Player", size=16, bold=True, color=ACC).pack(pady=(16, 2))
         label(self.root, "Plays ambient sound when your PC is silent", size=9, color=DIM).pack()
@@ -563,19 +564,19 @@ class App:
             self.tab_btn_advanced.config(bg=BTN_BG, fg=DIM)
             if tab == "main":
                 self.tab_main.pack(fill="both", expand=True)
-                self.tab_btn_main.config(bg=ACC, fg="#1e1e2e")
+                self.tab_btn_main.config(bg=ACC, fg=theme.ON_ACCENT)
             elif tab == "exclude":
                 self.tab_exclude.pack(fill="both", expand=True)
-                self.tab_btn_exclude.config(bg=ACC, fg="#1e1e2e")
+                self.tab_btn_exclude.config(bg=ACC, fg=theme.ON_ACCENT)
             else:
                 self.tab_advanced.pack(fill="both", expand=True)
-                self.tab_btn_advanced.config(bg=ACC, fg="#1e1e2e")
+                self.tab_btn_advanced.config(bg=ACC, fg=theme.ON_ACCENT)
 
         self.tab_btn_main = RoundButton(tab_bar, text="Player",
                                       command=lambda: switch_tab("main"),
                                       relief="flat", font=("Segoe UI", 10, "bold"),
                                       padx=16, pady=5, cursor="hand2",
-                                      bg=ACC, fg="#1e1e2e")
+                                      bg=ACC, fg=theme.ON_ACCENT)
         self.tab_btn_main.pack(side="left", padx=3)
 
         self.tab_btn_exclude = RoundButton(tab_bar, text="Exclude Apps",
@@ -598,44 +599,44 @@ class App:
 
         self.tab_main.pack(fill="both", expand=True)
 
-        status_frame = tk.Frame(self.root, bg="#181825")
+        status_frame = tk.Frame(self.root, bg=theme.PANE)
         status_frame.pack(fill="x", side="bottom")
 
         # "A new version is available" (hidden until needed).
-        self.update_row = tk.Frame(status_frame, bg="#313244", padx=12, pady=8)
+        self.update_row = tk.Frame(status_frame, bg=theme.CARD, padx=12, pady=8)
         round_corners(self.update_row, RADIUS_CARD)
-        self.update_label = tk.Label(self.update_row, bg="#313244", fg=FG,
+        self.update_label = tk.Label(self.update_row, bg=theme.CARD, fg=FG,
                                      font=("Segoe UI", 9), wraplength=470, justify="left")
         self.update_label.pack(anchor="w")
-        update_buttons = tk.Frame(self.update_row, bg="#313244")
+        update_buttons = tk.Frame(self.update_row, bg=theme.CARD)
         update_buttons.pack(anchor="w", pady=(4, 0))
         self.update_btn = RoundButton(update_buttons, text="Download", command=self._open_update,
-                                    bg="#a6e3a1", fg="#1e1e2e", relief="flat",
+                                    bg=theme.SUCCESS, fg=theme.ON_ACCENT, relief="flat",
                                     font=("Segoe UI", 9, "bold"), padx=10, pady=3,
                                     cursor="hand2")
         self.update_btn.pack(side="left")
         for text, cmd in (("Skip this version", self._skip_update),
                           ("Later", self._update_later_clicked)):
             RoundButton(update_buttons, text=text, command=cmd,
-                      bg="#45475a", fg=FG, relief="flat", font=("Segoe UI", 9, "bold"),
+                      bg=theme.CONTROL, fg=FG, relief="flat", font=("Segoe UI", 9, "bold"),
                       padx=10, pady=3, cursor="hand2").pack(side="left", padx=(6, 0))
 
         # One-click fix for an app that seems to mirror our sound (hidden until needed).
-        self.suggest_row = tk.Frame(status_frame, bg="#313244", padx=12, pady=8)
+        self.suggest_row = tk.Frame(status_frame, bg=theme.CARD, padx=12, pady=8)
         round_corners(self.suggest_row, RADIUS_CARD)
-        self.suggest_label = tk.Label(self.suggest_row, bg="#313244", fg=FG,
+        self.suggest_label = tk.Label(self.suggest_row, bg=theme.CARD, fg=FG,
                                       font=("Segoe UI", 9), wraplength=470, justify="left")
         self.suggest_label.pack(anchor="w")
-        suggest_buttons = tk.Frame(self.suggest_row, bg="#313244")
+        suggest_buttons = tk.Frame(self.suggest_row, bg=theme.CARD)
         suggest_buttons.pack(anchor="w", pady=(4, 0))
         self.suggest_btn = RoundButton(suggest_buttons, text="Treat as mirroring app",
                                      command=self._accept_mirror_suggestion,
-                                     bg=ACC, fg="#1e1e2e", relief="flat",
+                                     bg=ACC, fg=theme.ON_ACCENT, relief="flat",
                                      font=("Segoe UI", 9, "bold"), padx=10, pady=3,
                                      cursor="hand2")
         self.suggest_btn.pack(side="left")
         RoundButton(suggest_buttons, text="Dismiss", command=self._dismiss_mirror_suggestion,
-                  bg="#45475a", fg=FG, relief="flat", font=("Segoe UI", 9, "bold"),
+                  bg=theme.CONTROL, fg=FG, relief="flat", font=("Segoe UI", 9, "bold"),
                   padx=10, pady=3, cursor="hand2").pack(side="left", padx=(6, 0))
 
         # Version number, tucked away bottom-left (handy for bug reports). The
@@ -648,11 +649,11 @@ class App:
         side_pad = max(52, version_w + 20)
         self.status_var = tk.StringVar(value=self._status)
         self.status_label = tk.Label(status_frame, textvariable=self.status_var,
-                                     bg="#181825", fg=DIM, font=("Segoe UI", 9), pady=8,
+                                     bg=theme.PANE, fg=DIM, font=("Segoe UI", 9), pady=8,
                                      padx=side_pad,
                                      wraplength=max(240, self.WINDOW_W - 2 * side_pad - 16))
         self.status_label.pack(fill="x")
-        tk.Label(status_frame, text=version_text, bg="#181825", fg="#585b70",
+        tk.Label(status_frame, text=version_text, bg=theme.PANE, fg=theme.DISABLED,
                  font=("Segoe UI", 8)).place(in_=self.status_label, relx=0, rely=0.5,
                                              x=10, anchor="w")
 
@@ -674,7 +675,7 @@ class App:
                 _refresh_mode()
             b = RoundButton(mode_frame, text=text, command=on_click,
                           relief="flat", font=("Segoe UI", 10, "bold"),
-                          padx=12, pady=5, cursor="hand2", disabledforeground="#585b70")
+                          padx=12, pady=5, cursor="hand2", disabledforeground=theme.DISABLED)
             b.pack(side="left", padx=3)
             # A disabled button ignores its command but still sees the click.
             b.bind("<Button-1>", lambda e: self._mode_locked_hint(val), add="+")
@@ -688,7 +689,7 @@ class App:
             m, locked = self.mode_var.get(), self.monitoring
             for b, val in ((self.btn_single, "single"), (self.btn_playlist, "playlist")):
                 selected = m == val
-                b.config(bg=ACC if selected else BTN_BG, fg="#1e1e2e" if selected else DIM,
+                b.config(bg=ACC if selected else BTN_BG, fg=theme.ON_ACCENT if selected else DIM,
                          state="disabled" if locked and not selected else "normal",
                          cursor="arrow" if locked else "hand2")
 
@@ -733,9 +734,9 @@ class App:
         def _refresh_single_toggle():
             v = self.single_loop_var.get()
             self.s_btn_loop.config(bg=ACC if v == "loop" else BTN_BG,
-                                   fg="#1e1e2e" if v == "loop" else DIM)
-            self.s_btn_stop.config(bg="#f38ba8" if v == "stop" else BTN_BG,
-                                   fg="#1e1e2e" if v == "stop" else DIM)
+                                   fg=theme.ON_ACCENT if v == "loop" else DIM)
+            self.s_btn_stop.config(bg=theme.ERROR if v == "stop" else BTN_BG,
+                                   fg=theme.ON_ACCENT if v == "stop" else DIM)
 
         _refresh_single_toggle()
 
@@ -750,7 +751,7 @@ class App:
                                                width_chars=15)
         self.playlist_entry.grid(row=1, column=0, sticky="w")
         self.playlist_browse_btn = button(playlist_card, "Browse", self._browse_playlist)
-        self.playlist_browse_btn.config(disabledforeground="#585b70")
+        self.playlist_browse_btn.config(disabledforeground=theme.DISABLED)
         self.playlist_browse_btn.grid(row=1, column=1, padx=(6, 10))
         # A disabled button ignores its command but still sees the click:
         # say why it's greyed out.
@@ -778,11 +779,11 @@ class App:
         def _refresh_playlist_toggle():
             v = self.playlist_loop_var.get()
             self.p_btn_loop_song.config(bg=ACC if v == "loop_song" else BTN_BG,
-                                        fg="#1e1e2e" if v == "loop_song" else DIM)
-            self.p_btn_stop.config(bg="#f38ba8" if v == "stop" else BTN_BG,
-                                   fg="#1e1e2e" if v == "stop" else DIM)
-            self.p_btn_loop_pl.config(bg="#a6e3a1" if v == "loop_playlist" else BTN_BG,
-                                      fg="#1e1e2e" if v == "loop_playlist" else DIM)
+                                        fg=theme.ON_ACCENT if v == "loop_song" else DIM)
+            self.p_btn_stop.config(bg=theme.ERROR if v == "stop" else BTN_BG,
+                                   fg=theme.ON_ACCENT if v == "stop" else DIM)
+            self.p_btn_loop_pl.config(bg=theme.SUCCESS if v == "loop_playlist" else BTN_BG,
+                                      fg=theme.ON_ACCENT if v == "loop_playlist" else DIM)
 
         _refresh_playlist_toggle()
 
@@ -815,8 +816,8 @@ class App:
             v = self.fade_enabled_var.get()
             self.config["fade_enabled"] = v
             self.fade_btn.config(
-                bg="#a6e3a1" if v else BTN_BG,
-                fg="#1e1e2e" if v else DIM,
+                bg=theme.SUCCESS if v else BTN_BG,
+                fg=theme.ON_ACCENT if v else DIM,
                 text="Enabled" if v else "Disabled")
 
         self.fade_btn = RoundButton(fade_row,
@@ -867,9 +868,9 @@ class App:
 
         btn_frame = tk.Frame(parent, bg=BG)
         btn_frame.pack(pady=6)
-        self.start_btn = button(btn_frame, "Start Monitoring", self._toggle_monitoring, color="#a6e3a1")
+        self.start_btn = button(btn_frame, "Start Monitoring", self._toggle_monitoring, color=theme.SUCCESS)
         self.start_btn.pack(side="left", padx=6)
-        button(btn_frame, "Save Settings", self._save_settings, color="#f9e2af").pack(side="left", padx=6)
+        button(btn_frame, "Save Settings", self._save_settings, color=theme.WARNING).pack(side="left", padx=6)
 
         _refresh_mode()
         self._refresh_path_fields()
@@ -877,11 +878,11 @@ class App:
     # ── Now playing ──
 
     NOW_COLORS = {             # badge background, badge text, title colour
-        "playing": ("#a6e3a1", "#1e1e2e", "#cdd6f4"),
-        "ducked":  ("#f9e2af", "#1e1e2e", "#cdd6f4"),
-        "paused":  ("#89b4fa", "#1e1e2e", "#cdd6f4"),
-        "waiting": ("#313244", "#a6adc8", "#7f849c"),
-        "off":     ("#313244", "#6c7086", "#7f849c"),
+        "playing": (theme.SUCCESS, theme.ON_ACCENT, theme.TEXT),
+        "ducked":  (theme.WARNING, theme.ON_ACCENT, theme.TEXT),
+        "paused":  (theme.ACCENT, theme.ON_ACCENT, theme.TEXT),
+        "waiting": (theme.CONTROL, theme.LABEL, theme.SUBTLE),
+        "off":     (theme.CONTROL, theme.SUBTLE, theme.SUBTLE),
     }
 
     def _build_now_playing(self, parent, CARD, FG, DIM, BTN_BG, ACC):
@@ -946,9 +947,9 @@ class App:
         color = self.NOW_COLORS.get(now.kind if now else "off")[0]
         width = max(4, self.np_bar.winfo_width())
         x = round(width * frac)
-        track = photo(self.np_bar, width, 4, "#313244", kind="capsule")
+        track = photo(self.np_bar, width, 4, theme.CONTROL, kind="capsule")
         fill = photo(self.np_bar, max(4, x), 4, color, kind="capsule")
-        knob = photo(self.np_bar, 10, 10, "#cdd6f4", kind="capsule")
+        knob = photo(self.np_bar, 10, 10, theme.TEXT, kind="capsule")
         self._np_images = [track, fill, knob]       # keep them alive while shown
         self.np_bar.itemconfig(self._np_track, image=track)
         self.np_bar.itemconfig(self._np_fill, image=fill, state="normal" if x > 0 else "hidden")
@@ -1070,13 +1071,13 @@ class App:
         status = self._startup.status()
         on = bool(self.startup_var.get())
         if status == "unavailable":
-            self.startup_btn.config(text="Windows only", state="disabled", bg="#313244",
-                                    fg="#585b70", cursor="arrow")
+            self.startup_btn.config(text="Windows only", state="disabled", bg=theme.CONTROL,
+                                    fg=theme.DISABLED, cursor="arrow")
             self.startup_hint.config(text="")
             return
         self.startup_btn.config(state="normal", cursor="hand2",
-                                bg="#a6e3a1" if on else "#313244",
-                                fg="#1e1e2e" if on else "#6c7086",
+                                bg=theme.SUCCESS if on else theme.CONTROL,
+                                fg=theme.ON_ACCENT if on else theme.SUBTLE,
                                 text="Enabled" if on else "Disabled")
         if status == "blocked" and not on:
             hint = "Turned off in Windows Settings (Startup apps). Enable it here to undo."
@@ -1124,11 +1125,11 @@ class App:
         tip = tk.Toplevel(self.root)
         tip.wm_overrideredirect(True)
         tip.wm_geometry(f"+{field.winfo_rootx()}+{field.winfo_rooty() + field.winfo_height() + 4}")
-        tk.Label(tip, text=os.path.normpath(full), bg="#313244", fg="#cdd6f4",
+        tk.Label(tip, text=os.path.normpath(full), bg=theme.CARD, fg=theme.TEXT,
                  font=("Segoe UI", 9), padx=10, pady=5, bd=0).pack()
         # Rounded corners and a border drawn by Windows 11, like the tray menu.
         tip.update_idletasks()
-        round_window_corners(tip, "#45475a")
+        round_window_corners(tip, theme.OVERLAY0)
         self._path_tip = tip
 
     def _hide_path_tip(self):
@@ -1158,7 +1159,7 @@ class App:
 
         self.exclude_listbox = RoundList(
             list_frame, yscrollcommand=scrollbar.set, fg=FG,
-            selectbackground=ACC, selectforeground="#1e1e2e",
+            selectbackground=ACC, selectforeground=theme.ON_ACCENT,
             font=("Segoe UI", 10), height=8)
         self.exclude_listbox.pack(fill="both", expand=True)
         scrollbar.config(command=self.exclude_listbox.yview)
@@ -1200,18 +1201,18 @@ class App:
         btn_row.pack(fill="x", pady=(6, 0))
 
         RoundButton(btn_row, text="Add", command=add_app,
-                  bg=ACC, fg="#1e1e2e", relief="flat",
+                  bg=ACC, fg=theme.ON_ACCENT, relief="flat",
                   font=("Segoe UI", 10, "bold"),
                   padx=16, pady=5, cursor="hand2").pack(side="left", padx=(0, 6))
         RoundButton(btn_row, text="Remove Selected", command=remove_app,
-                  bg=BTN_BG, fg="#f38ba8", relief="flat",
+                  bg=BTN_BG, fg=theme.ERROR, relief="flat",
                   font=("Segoe UI", 10, "bold"),
                   padx=16, pady=5, cursor="hand2").pack(side="left")
 
         add_entry.bind("<Return>", lambda e: add_app())
 
     def _build_advanced_tab(self, parent, BG, CARD, FG, ACC, BTN_BG, DIM):
-        self._DIM, self._GOOD = DIM, "#a6e3a1"
+        self._DIM, self._GOOD = DIM, theme.SUCCESS
         tk.Label(parent, text="Advanced Settings", bg=BG, fg=ACC,
                  font=("Segoe UI", 12, "bold")).pack(pady=(12, 2))
         tk.Label(parent, text="Fixes for apps that confuse silence detection.",
@@ -1255,7 +1256,7 @@ class App:
         scrollbar.pack(side="right", fill="y", pady=4)
         self.mirror_listbox = RoundList(
             list_frame, yscrollcommand=scrollbar.set, fg=FG,
-            selectbackground=ACC, selectforeground="#1e1e2e",
+            selectbackground=ACC, selectforeground=theme.ON_ACCENT,
             font=("Segoe UI", 10), height=5)
         self.mirror_listbox.pack(fill="x", expand=True)
         scrollbar.config(command=self.mirror_listbox.yview)
@@ -1309,7 +1310,7 @@ class App:
         add_entry.bind("<Return>", add_app)
         for text, cmd, color in (("Add", add_app, ACC),
                                  ("On / Off", toggle_selected, FG),
-                                 ("Remove", remove_selected, "#f38ba8")):
+                                 ("Remove", remove_selected, theme.ERROR)):
             RoundButton(add_row, text=text, command=cmd, bg=BTN_BG, fg=color,
                       relief="flat", font=("Segoe UI", 9, "bold"), padx=10, pady=4,
                       cursor="hand2").pack(side="left", padx=(6, 0))
@@ -1367,8 +1368,8 @@ class App:
 
     def _refresh_mirror_ui(self, select=None):
         on = bool(self.mirror_fix_var.get())
-        self.mirror_btn.config(bg=self._GOOD if on else "#313244",
-                               fg="#1e1e2e" if on else self._DIM,
+        self.mirror_btn.config(bg=self._GOOD if on else theme.CONTROL,
+                               fg=theme.ON_ACCENT if on else self._DIM,
                                text="Enabled" if on else "Disabled")
         apps = _coerce_mirror_apps(self.config.get("mirror_apps", []))
         self.mirror_listbox.delete(0, tk.END)
@@ -1380,7 +1381,7 @@ class App:
         count = sum(1 for a in apps if a["enabled"])
         if on and PROCTAP_IMPORT_ERROR is not None:
             self.mirror_status.config(
-                text="● Unavailable — ProcTap could not be loaded (see log)", fg="#f38ba8")
+                text="● Unavailable — ProcTap could not be loaded (see log)", fg=theme.ERROR)
         elif on:
             self.mirror_status.config(
                 text=f"● Active — checking {count} app{'s' if count != 1 else ''}",
@@ -1471,9 +1472,9 @@ class App:
 
     def _set_monitoring_ui(self, on):
         if on:
-            self.start_btn.config(text="Stop Monitoring", fg="#f38ba8")
+            self.start_btn.config(text="Stop Monitoring", fg=theme.ERROR)
         else:
-            self.start_btn.config(text="Start Monitoring", fg="#a6e3a1")
+            self.start_btn.config(text="Start Monitoring", fg=theme.SUCCESS)
         self.playlist_browse_btn.config(state="disabled" if on else "normal",
                                         cursor="arrow" if on else "hand2")
         self._style_mode_buttons()

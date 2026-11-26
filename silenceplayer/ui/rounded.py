@@ -24,6 +24,8 @@ from functools import lru_cache
 
 from PIL import Image, ImageColor, ImageDraw, ImageTk
 
+from . import theme
+
 SUPERSAMPLE = 4
 EXTENT = 1.52866483          # how far each corner reaches along the edges, x radius
 
@@ -209,9 +211,9 @@ class RoundButton(tk.Label):
     _IGNORED = {"relief", "bd", "borderwidth", "overrelief", "highlightthickness",
                 "takefocus", "default", "activeforeground"}
 
-    def __init__(self, master, text="", command=None, bg="#313244", fg="#cdd6f4",
+    def __init__(self, master, text="", command=None, bg=theme.CONTROL, fg=theme.TEXT,
                  font=("Segoe UI", 10, "bold"), padx=8, pady=5, width=0,
-                 radius=RADIUS_CONTROL, activebackground=None, disabledforeground="#585b70",
+                 radius=RADIUS_CONTROL, activebackground=None, disabledforeground=theme.DISABLED,
                  state="normal", cursor=None, border=None, **kw):
         for key in list(kw):
             if key in self._IGNORED:
@@ -358,7 +360,7 @@ class RoundScrollbar(tk.Canvas):
 
     MIN_THUMB = 24
 
-    def __init__(self, master, thumb="#585b70", command=None, width=6, pad=2):
+    def __init__(self, master, thumb=theme.OVERLAY0, command=None, width=6, pad=2):
         bg = master.cget("bg")
         # height=1: follow the list's height (a canvas would ask for 267 px).
         super().__init__(master, width=width + 2 * pad, height=1, bg=bg,
@@ -571,7 +573,7 @@ class RoundSlider(tk.Canvas):
     KNOB = 16
 
     def __init__(self, master, from_=0, to=100, resolution=1, variable=None, command=None,
-                 track="#313244", fill="#89b4fa", knob="#cdd6f4", length=150):
+                 track=theme.CONTROL, fill=theme.ACCENT, knob=theme.TEXT, length=150):
         bg = master.cget("bg")
         super().__init__(master, width=length, height=self.KNOB + 2, bg=bg,
                          highlightthickness=0, bd=0, cursor="hand2")

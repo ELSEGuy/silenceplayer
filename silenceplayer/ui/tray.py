@@ -8,6 +8,7 @@ from PIL import Image, ImageDraw
 
 from ..logs import log
 from ..paths import resource_path
+from . import theme
 
 
 def create_tray_icon():
@@ -18,12 +19,12 @@ def create_tray_icon():
         log.warning("Could not load trayicon.png; using the built-in icon", exc_info=True)
         img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
-        draw.ellipse([0, 0, 63, 63], fill="#1e1e2e")
-        draw.rectangle([24, 18, 30, 42], fill="#89b4fa")
-        draw.rectangle([30, 18, 44, 26], fill="#89b4fa")
-        draw.rectangle([38, 26, 44, 42], fill="#89b4fa")
-        draw.ellipse([18, 38, 32, 48], fill="#89b4fa")
-        draw.ellipse([32, 38, 46, 48], fill="#89b4fa")
+        draw.ellipse([0, 0, 63, 63], fill=theme.BASE)
+        draw.rectangle([24, 18, 30, 42], fill=theme.BLUE)
+        draw.rectangle([30, 18, 44, 26], fill=theme.BLUE)
+        draw.rectangle([38, 26, 44, 42], fill=theme.BLUE)
+        draw.ellipse([18, 38, 32, 48], fill=theme.BLUE)
+        draw.ellipse([32, 38, 46, 48], fill=theme.BLUE)
         return img
 
 
@@ -79,7 +80,7 @@ class TrayMenu:
     """
 
     BG, BORDER, FG, HOVER, SEP = "#2c2c2c", "#3d3d3d", "#f0f0f0", "#383838", "#3d3d3d"
-    HEAD_COLORS = {"playing": "#a6e3a1", "ducked": "#f9e2af", "paused": "#89b4fa",
+    HEAD_COLORS = {"playing": theme.GREEN, "ducked": theme.YELLOW, "paused": theme.BLUE,
                    "waiting": "#9a9a9a", "off": "#9a9a9a"}
     MIN_WIDTH = 230
     POLL_MS = 40
