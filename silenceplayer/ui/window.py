@@ -582,7 +582,7 @@ class App:
                              activeforeground=color)
 
         self.title_label = label(self.root, "Silence Player", size=16, bold=True,
-                                 color=theme.BRAND)       # the icon's purple
+                                 color=theme.BRAND)       # Mauve, the app's colour
         self.title_label.pack(pady=(16, 2))
         label(self.root, "Plays ambient sound when your PC is silent", size=9, color=DIM).pack()
 
@@ -628,7 +628,7 @@ class App:
         update_buttons = tk.Frame(self.update_row, bg=theme.CARD)
         update_buttons.pack(anchor="w", pady=(4, 0))
         self.update_btn = RoundButton(update_buttons, text="Download", command=self._open_update,
-                                    bg=theme.SUCCESS, fg=theme.ON_ACCENT, relief="flat",
+                                    bg=theme.ACTIVE, fg=theme.ON_ACCENT, relief="flat",
                                     font=("Segoe UI", 9, "bold"), padx=10, pady=3,
                                     cursor="hand2")
         self.update_btn.pack(side="left")
@@ -756,7 +756,7 @@ class App:
 
         self.playlist_loop_pill = SegmentedControl(
             playlist_card, [("Loop Song", "loop_song", ACC), ("Stop", "stop", theme.ERROR),
-                            ("Loop Playlist", "loop_playlist", theme.SUCCESS)],
+                            ("Loop Playlist", "loop_playlist", theme.ACTIVE)],
             self.playlist_loop_var.get(), command=on_playlist_loop, track=BTN_BG,
             font=("Segoe UI", 9, "bold"), pad_x=10, height=30, equal=False)
         self.playlist_loop_pill.grid(row=1, column=2, sticky="w")
@@ -838,7 +838,7 @@ class App:
 
         btn_frame = tk.Frame(parent, bg=BG)
         btn_frame.pack(pady=6)
-        self.start_btn = button(btn_frame, "Start Monitoring", self._toggle_monitoring, color=theme.SUCCESS)
+        self.start_btn = button(btn_frame, "Start Monitoring", self._toggle_monitoring, color=theme.ACTIVE)
         self.start_btn.pack(side="left", padx=6)
         button(btn_frame, "Save Settings", self._save_settings, color=theme.WARNING).pack(side="left", padx=6)
 
@@ -848,7 +848,7 @@ class App:
     # ── Now playing ──
 
     NOW_COLORS = {             # badge background, badge text, title colour
-        "playing": (theme.SUCCESS, theme.ON_ACCENT, theme.TEXT),
+        "playing": (theme.ACTIVE, theme.ON_ACCENT, theme.TEXT),
         "ducked":  (theme.WARNING, theme.ON_ACCENT, theme.TEXT),
         "paused":  (theme.ACCENT, theme.ON_ACCENT, theme.TEXT),
         "waiting": (theme.CONTROL, theme.LABEL, theme.SUBTLE),
@@ -1285,7 +1285,7 @@ class App:
                         padx=8, pady=2).pack(side="left", padx=(0, 6))
 
     def _build_advanced_tab(self, parent, BG, CARD, FG, ACC, BTN_BG, DIM):
-        self._DIM, self._GOOD = DIM, theme.SUCCESS
+        self._DIM, self._GOOD = DIM, theme.ACTIVE
         card = tk.Frame(parent, bg=CARD, padx=16, pady=12)
         round_corners(card)
         card.pack(fill="x", padx=24, pady=(10, 4))
@@ -1534,7 +1534,7 @@ class App:
         if on:
             self.start_btn.config(text="Stop Monitoring", fg=theme.ERROR)
         else:
-            self.start_btn.config(text="Start Monitoring", fg=theme.SUCCESS)
+            self.start_btn.config(text="Start Monitoring", fg=theme.ACTIVE)
         self.playlist_browse_btn.config(state="disabled" if on else "normal",
                                         cursor="arrow" if on else "hand2")
         self._style_mode_buttons()

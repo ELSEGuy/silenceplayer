@@ -5,7 +5,8 @@ role each colour plays in the app, following Catppuccin's style guide
 (docs/style-guide.md): Base for the background pane, Mantle/Crust for secondary
 panes, Surface 0-2 for surface elements, Text for body copy, Subtext for labels,
 Base for text on accent colours, Blue for links and pills, Green for success,
-Yellow for warnings and Red for errors.
+Yellow for warnings and Red for errors. One deliberate change: where the guide
+uses Green (on, active, playing), Silence Player uses its own colour, Mauve.
 """
 
 # ── Catppuccin Frappé palette ────────────────────────────────────────────────
@@ -36,8 +37,10 @@ BASE      = "#303446"
 MANTLE    = "#292c3c"
 CRUST     = "#232634"
 
-# ── Silence Player's own colour (not Catppuccin) ─────────────────────────────
-BRAND     = "#d279e5"   # the light purple of the app/tray icon (the ghost's body)
+# ── Silence Player's own colour ──────────────────────────────────────────────
+# Frappé's Mauve: the theme's soft version of the purple in the app icon
+# (#d279e5 there is more vivid than any Frappé accent, so it would stand out).
+BRAND     = MAUVE
 
 # ── roles ────────────────────────────────────────────────────────────────────
 BG        = BASE        # window background (background pane)
@@ -51,6 +54,6 @@ SUBTLE    = OVERLAY2    # dimmed text: "off" states (Overlay 2 rather than the
 DISABLED  = OVERLAY0    # text of a control that can't be used right now
 ON_ACCENT = BASE        # text on an accent-coloured button or badge
 ACCENT    = BLUE        # selected tab/mode, links, highlights, pills
-SUCCESS   = GREEN
+ACTIVE    = BRAND       # on / active / playing (the guide's Green, see top)
 WARNING   = YELLOW
 ERROR     = RED

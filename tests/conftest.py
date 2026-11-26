@@ -398,6 +398,13 @@ def player_factory():
 
 # ── Tk window fixtures (UI tests) ────────────────────────────────────────────
 
+# Every window a test creates stays referenced until the test run ends. Worker
+# threads (playback, monitor, Playing now) may outlive their test; if Python's
+# garbage collector then freed an old window on one of them, Tcl would abort
+# the whole run ("Tcl_AsyncDelete: async handler deleted by the wrong thread").
+_KEEP_ALIVE = []
+
+
 @pytest.fixture
 def root():
     tk = pytest.importorskip("tkinter")
@@ -407,6 +414,7 @@ def root():
         r = tk.Tk()
     except tk.TclError as e:
         pytest.skip(f"no display: {e}")
+    _KEEP_ALIVE.append(r)
     yield r
     try:
         r.destroy()
@@ -431,5 +439,6 @@ def cfg_path(appmod, tmp_path, monkeypatch):
 
 def make_app(appmod, root):
     a = appmod.App(root)
+    _KEEP_ALIVE.append(a)
     pump(root, 0.3)
     return a

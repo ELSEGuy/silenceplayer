@@ -80,7 +80,7 @@ class TrayMenu:
     """
 
     BG, BORDER, FG, HOVER, SEP = "#2c2c2c", "#3d3d3d", "#f0f0f0", "#383838", "#3d3d3d"
-    HEAD_COLORS = {"playing": theme.GREEN, "ducked": theme.YELLOW, "paused": theme.BLUE,
+    HEAD_COLORS = {"playing": theme.ACTIVE, "ducked": theme.YELLOW, "paused": theme.BLUE,
                    "waiting": "#9a9a9a", "off": "#9a9a9a"}
     MIN_WIDTH = 230
     POLL_MS = 40

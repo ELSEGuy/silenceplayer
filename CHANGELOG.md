@@ -36,9 +36,11 @@
 - **Catppuccin Frappé colours.** The theme moves from Catppuccin Mocha to the
   softer Frappé flavour, using the official palette and Catppuccin's style
   guide for each role (Base window, Mantle status bar, Surface cards and
-  controls, Base text on accent colours, Blue/Green/Yellow/Red accents). All
-  colours now live in one place (`ui/theme.py`). The app name at the top is in the
-  light purple of Silence Player's icon.
+  controls, Base text on accent colours, Blue/Yellow/Red accents). All
+  colours now live in one place (`ui/theme.py`). Silence Player's own colour
+  is Frappé Mauve, the theme's soft take on the icon's purple: the app name,
+  and everything that is on, active or playing (switches, the Playing badge
+  and progress, Loop Playlist, Start Monitoring), where the guide uses Green.
 - **Continuous corners everywhere.** Cards, buttons, tabs, toggles, text
   fields, lists (including the selected row), sliders, the progress bar, the
   status badge and the bottom banners now have Apple-style continuous
@@ -81,6 +83,12 @@
   installs Silence Player for your Windows user (no admin rights), adds a Start
   menu shortcut and an uninstaller, and keeps your settings when you install a
   newer version. A portable zip is there too, for running it from any folder.
+
+### Fixed
+- **Rare crash when quitting.** Python's garbage collector could free the
+  window on a background thread, which makes Tcl abort the process ("async
+  handler deleted by the wrong thread"). The window now stays referenced until
+  Silence Player exits. (The test suite had the same rare abort; fixed too.)
 
 ### Improved
 - **Apps on any output device are detected.** Silence Player used to watch only

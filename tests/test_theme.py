@@ -30,7 +30,9 @@ def test_roles_follow_the_style_guide():
     assert theme.CONTROL in (theme.SURFACE0, theme.SURFACE1, theme.SURFACE2)
     assert theme.ON_ACCENT == theme.BASE           # text on accent colours
     assert theme.ACCENT == theme.BLUE
-    assert (theme.SUCCESS, theme.WARNING, theme.ERROR) == (theme.GREEN, theme.YELLOW, theme.RED)
+    assert (theme.WARNING, theme.ERROR) == (theme.YELLOW, theme.RED)
+    # the one deliberate change: on/active/playing use the app's colour, Mauve
+    assert theme.ACTIVE == theme.BRAND == theme.MAUVE
 
 
 def test_no_mocha_colours_left_in_the_ui():
@@ -40,12 +42,14 @@ def test_no_mocha_colours_left_in_the_ui():
         assert not found & MOCHA, f"{path.name}: {sorted(found & MOCHA)}"
 
 
-def test_app_name_uses_the_icon_purple(appmod, root, cfg_path, fast_timing):
+def test_app_name_and_on_states_use_mauve(appmod, root, cfg_path, fast_timing):
     from conftest import make_app
     a = make_app(appmod, root)
-    assert theme.BRAND == "#d279e5"
+    assert theme.BRAND == "#ca9ee6"
     assert a.title_label.cget("text") == "Silence Player"
     assert a.title_label.cget("fg") == theme.BRAND
+    assert a.fade_switch._colours[0] == theme.MAUVE          # switches are Mauve when on
+    assert a.NOW_COLORS["playing"][0] == theme.MAUVE
     a.monitor.stop(wait=True)
 
 

@@ -663,8 +663,8 @@ class RoundSlider(tk.Canvas):
 
 
 class Switch(tk.Canvas):
-    """An on/off switch: a pill with a sliding knob. Green with a dark knob
-    when on, grey when off (Catppuccin: Base on an accent colour).
+    """An on/off switch: a pill with a sliding knob. Mauve (theme.ACTIVE) with a
+    dark knob when on, grey when off (Catppuccin: Base on an accent colour).
 
     value / get() / set(on) change it without calling `command`; a click (or
     invoke()) flips it and calls command(new_value). state="disabled" greys it
@@ -674,7 +674,7 @@ class Switch(tk.Canvas):
     W, H, KNOB = 44, 24, 18
     SLIDE_MS, SLIDE_STEPS = 120, 6
 
-    def __init__(self, master, value=False, command=None, on=theme.GREEN, off=theme.SURFACE2,
+    def __init__(self, master, value=False, command=None, on=theme.ACTIVE, off=theme.SURFACE2,
                  knob_on=theme.BASE, knob_off=theme.OVERLAY2):
         super().__init__(master, width=self.W, height=self.H, bg=master.cget("bg"),
                          highlightthickness=0, bd=0, cursor="hand2")

@@ -13,6 +13,9 @@ from .paths import log_dir
 from .ui.window import App
 from .winaudio import ensure_mta
 
+# The Tk window and the App, alive until exit (see main).
+_KEEP_ALIVE = []
+
 
 def main():
     setup_logging()
@@ -30,7 +33,11 @@ def main():
     try:
         root = tk.Tk()
         try:
-            App(root, instance)
+            # Kept referenced until the process ends: if Python's garbage
+            # collector ever freed the window on a worker thread (it runs on
+            # whichever thread triggers it), Tcl would abort the process
+            # ("Tcl_AsyncDelete: async handler deleted by the wrong thread").
+            _KEEP_ALIVE.extend((root, App(root, instance)))
         except Exception as e:
             log.critical("Startup failed", exc_info=True)
             root.withdraw()
