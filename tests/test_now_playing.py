@@ -282,7 +282,7 @@ def test_tray_menu_items_and_actions(appmod, root, cfg_path, fast_timing):
     assert menu.is_open
     texts = [l.cget("text") for l in _labels(menu.win)]
     assert texts == ["Now playing", "ANIMAL CROSSING OFFICE.opus", "Open Settings",
-                     "Download v1.4.1", "Stop Monitoring", "Quit"]
+                     "Pause", "Download v1.4.1", "Stop Monitoring", "Quit"]
     assert _labels(menu.win)[0].cget("fg") == menu.HEAD_COLORS["playing"]
 
     # the header follows the state while the menu is open
@@ -317,3 +317,109 @@ def test_tray_menu_stays_on_screen(appmod, root):
     w = menu.win
     assert w.winfo_x() + w.winfo_width() <= sw and w.winfo_y() + w.winfo_height() <= sh
     menu.close()
+
+
+def test_paused(appmod, cfg):
+    track = appmod.TrackInfo(FILE, 65, 130, paused=True)
+    for phase in ("playing", "ducked"):
+        now = describe(appmod, cfg, phase, track)
+        assert now.kind == "paused" and now.badge == "Paused"
+        assert now.detail == "1:05 / 2:10" and now.progress == pytest.approx(0.5)
+        assert "Paused: " in now.tooltip
+        assert now.menu_head == "Paused"
+
+
+def _card_app(appmod, root, monkeypatch, track):
+    monkeypatch.setattr(appmod.App, "NOW_PLAYING_MS", 20)
+    a = make_app(appmod, root)
+    a.config["mp3_path"] = FILE
+    a.monitoring = True
+    a.monitor.info = appmod.MonitorInfo("playing")
+    calls = []
+
+    class Controls:
+        def __init__(self):
+            self.track = track
+            self.paused_flag = False
+
+        def track_info(self):
+            return self.track
+
+        def toggle_pause(self):
+            calls.append("toggle")
+
+        def seek(self, secs):
+            calls.append(("seek", round(secs, 1)))
+
+        def set_level(self, v):
+            calls.append(("level", round(v, 1)))
+
+    ctl = Controls()
+    for name in ("track_info", "toggle_pause", "seek", "set_level"):
+        monkeypatch.setattr(a.player, name, getattr(ctl, name))
+    pump(root, 0.1)
+    return a, ctl, calls
+
+
+def test_card_controls(appmod, root, cfg_path, fast_timing, monkeypatch):
+    a, ctl, calls = _card_app(appmod, root, monkeypatch, appmod.TrackInfo(FILE, 60, 600))
+    assert a.np_play_btn.cget("text") == "\u275a\u275a"
+    a.np_play_btn.invoke()
+    a.np_fwd_btn.invoke()
+    a.np_back_btn.invoke()
+    assert calls == ["toggle", ("seek", 70), ("seek", 50)]
+
+    ctl.track = appmod.TrackInfo(FILE, 60, 600, paused=True)
+    pump(root, 0.1)
+    assert a.np_badge.cget("text") == "Paused"
+    assert a.np_play_btn.cget("text") == "▶"
+
+    # click a quarter of the way along the bar → 150 s of the 600 s track
+    calls.clear()
+    a.np_bar.update_idletasks()
+    w = a.np_bar.winfo_width()
+    a.np_bar.event_generate("<ButtonPress-1>", x=w // 4, y=5)
+    a.np_bar.event_generate("<ButtonRelease-1>", x=w // 4, y=5)
+    pump(root, 0.05)
+    assert len(calls) == 1 and calls[0][0] == "seek"
+    assert calls[0][1] == pytest.approx(150, abs=3)
+    a.monitor.stop(wait=True)
+
+
+def test_play_button_when_nothing_is_playing(appmod, root, cfg_path, fast_timing,
+                                             monkeypatch):
+    a, ctl, calls = _card_app(appmod, root, monkeypatch, None)
+    a.monitor.info = appmod.MonitorInfo("waiting", remaining=20)
+    asked = []
+    monkeypatch.setattr(a.monitor, "play_now", lambda: asked.append(True))
+    a.np_play_btn.invoke()
+    assert asked == [True] and calls == []
+
+    a.monitoring = False
+    a.np_play_btn.invoke()
+    pump(root, 0.05)
+    assert asked == [True]
+    assert "Start Monitoring" in a.status_var.get()
+    a.monitor.stop(wait=True)
+
+
+def test_volume_and_duck_apply_live(appmod, root, cfg_path, fast_timing, monkeypatch):
+    a, ctl, calls = _card_app(appmod, root, monkeypatch, appmod.TrackInfo(FILE, 60, 600))
+    a.config["duck_percent"] = 50
+    a.np_vol.set(40)
+    pump(root, 0.05)
+    assert a.config["max_volume"] == 40 and a.vol_var.get() == "40"
+    assert calls[-1] == ("level", 40)
+
+    a.monitor.info = appmod.MonitorInfo("ducked", apps=("discord.exe",), duck_percent=50)
+    a.duck_var.set(25)
+    a._on_duck_change(25)
+    assert a.config["duck_percent"] == 25
+    assert calls[-1] == ("level", 10)     # 25% of 40
+
+    a.vol_var.set("80")                   # typed in the Max Volume field
+    a._commit_inputs_quietly()
+    assert a.np_vol_var.get() == 80
+    assert calls[-1] == ("level", 20)     # still ducked: 25% of 80
+    assert not cfg_path.exists(), "live changes are not saved until Save Settings"
+    a.monitor.stop(wait=True)

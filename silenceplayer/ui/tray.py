@@ -79,7 +79,7 @@ class TrayMenu:
     """
 
     BG, BORDER, FG, HOVER, SEP = "#2c2c2c", "#3d3d3d", "#f0f0f0", "#383838", "#3d3d3d"
-    HEAD_COLORS = {"playing": "#a6e3a1", "ducked": "#f9e2af",
+    HEAD_COLORS = {"playing": "#a6e3a1", "ducked": "#f9e2af", "paused": "#89b4fa",
                    "waiting": "#9a9a9a", "off": "#9a9a9a"}
     MIN_WIDTH = 230
     POLL_MS = 40

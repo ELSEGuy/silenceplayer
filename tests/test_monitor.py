@@ -455,3 +455,44 @@ def test_audio_routing_apps_are_not_counted(appmod, monkeypatch):
     result = appmod.get_playing_apps([])
     assert result == {"spotify.exe"}
     assert result.excluded_audible == set()
+
+
+# ── Play button and pause ────────────────────────────────────────────────────
+
+def test_play_now_starts_without_waiting_for_silence(appmod, make_config):
+    clock = Clock()
+    apps = set()
+    app, mon = make_monitor(appmod, make_config, lambda ex: set(apps), clock=clock,
+                            silence_seconds=60)
+    state, ev = appmod._MonitorState(), threading.Event()
+    mon._tick(state, ev)
+    assert app.player.plays == 0
+    mon.play_now()
+    clock.t += 1
+    mon._tick(state, ev)
+    assert app.player.plays == 1 and state.ambient_triggered
+    assert mon.info.phase == "playing"
+    clock.t += 1
+    mon._tick(state, ev)                   # the request was used up
+    assert app.player.plays == 1
+
+
+def test_paused_sound_cannot_be_mirrored(appmod, make_config):
+    """A paused ambient sound is silent: apps playing then are real audio."""
+    clock = Clock()
+    apps = set()
+    app, mon = make_monitor(appmod, make_config, lambda ex: _playing(appmod, apps),
+                            clock=clock, silence_seconds=5, duck_percent=50)
+    app.player = AudiblePlayer()
+    app.mirror_fix = FlexFix({"signalrgb.exe": False})
+    state, ev = appmod._MonitorState(), threading.Event()
+    mon._tick(state, ev)
+    clock.t += 6
+    mon._tick(state, ev)                   # ambient starts
+    app.player.audible = False             # the user pauses it
+    app.player.paused = True
+    clock.t += 5
+    apps.add("signalrgb.exe")
+    mon._tick(state, ev)
+    assert app.mirror_fix.asked == [], "nothing to mirror while paused"
+    assert state.ducked

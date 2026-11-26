@@ -18,8 +18,8 @@ TRAY_MENU_MAX = 60
 
 
 class NowPlaying(NamedTuple):
-    badge: str          # "Playing", "Ducked 50%", "Waiting", "Off"
-    kind: str           # "playing", "ducked", "waiting", "off": picks the colours
+    badge: str          # "Playing", "Paused", "Ducked 50%", "Waiting", "Off"
+    kind: str           # "playing", "paused", "ducked", "waiting", "off": picks the colours
     title: str          # file name
     detail: str         # time, countdown or reason
     progress: float | None  # 0..1, or None for no bar
@@ -91,6 +91,11 @@ def describe_now_playing(monitoring: bool, info: MonitorInfo | None,
         return listening()
     phase = info.phase
 
+    if phase in ("playing", "ducked") and track is not None and track.paused:
+        detail, bar = clock_and_bar()
+        return NowPlaying("Paused", "paused", name, detail, bar,
+                          tip(f"Paused: {name}"), menu("Paused: "),
+                          "Paused", head(name))
     if phase == "playing":
         detail, bar = clock_and_bar()
         return NowPlaying("Playing", "playing", name, detail, bar,

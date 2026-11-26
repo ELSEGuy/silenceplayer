@@ -105,6 +105,7 @@ class TrackInfo(NamedTuple):
     path: str
     position: float | None = None
     length: float | None = None
+    paused: bool = False
 
 
 class _PlaybackSession:
@@ -122,6 +123,7 @@ class _PlaybackSession:
         self.current_index = 0
         self.pending_pos = 0.0                # start position of the track being loaded
         self.error = None
+        self.paused = False                   # paused by the user (Now playing card)
 
 
 class AmbientPlayer:
@@ -188,14 +190,107 @@ class AmbientPlayer:
             except Exception:
                 log_throttled("vlc_track_info", logging.DEBUG, "VLC time query failed",
                               exc_info=True, interval=300)
-        return TrackInfo(path, pos, length)
+        return TrackInfo(path, pos, length, self.paused)
 
     @property
     def audible(self):
         """True while our sound may still be coming out, including the fade-out
-        after stop() (the session ends only once the fade is over)."""
+        after stop() (the session ends only once the fade is over). Not while
+        paused."""
         with self._lock:
-            return self._session is not None
+            return self._session is not None and not self._session.paused
+
+    @property
+    def paused(self):
+        with self._lock:
+            return self._session is not None and self._session.paused
+
+    # ── user controls (Now playing card) ──
+
+    PAUSE_FADE_SECONDS = 0.25
+    LEVEL_SECONDS = 0.25
+
+    def _controllable(self):
+        """The session the controls act on, if a track is playing (or paused)."""
+        s = self._session
+        if s is None or s.finished or s.stop_event.is_set() or not s.track_started.is_set():
+            return None
+        return s
+
+    def pause(self):
+        """Fade out quickly and pause. Returns True if it paused."""
+        with self._lock:
+            s = self._controllable()
+            if s is None or s.paused:
+                return False
+            s.paused = True
+            gen = self._new_ramp()
+        log.info("Paused by the user")
+
+        def run():
+            if self._ramp(gen, 0, self.PAUSE_FADE_SECONDS, 5, abort_event=s.stop_event):
+                with self._lock:
+                    if s.paused and not s.stop_event.is_set():
+                        try:
+                            self.media_player.set_pause(1)
+                        except Exception:
+                            log.warning("VLC pause failed", exc_info=True)
+        threading.Thread(target=run, daemon=True, name="Pause").start()
+        return True
+
+    def resume(self):
+        """Resume after pause() and fade back to the current level."""
+        with self._lock:
+            s = self._controllable()
+            if s is None or not s.paused:
+                return False
+            s.paused = False
+            gen = self._new_ramp()
+            self._set_volume(0)
+            try:
+                self.media_player.set_pause(0)
+            except Exception:
+                log.warning("VLC resume failed", exc_info=True)
+            target = self._target_vol
+        log.info("Resumed by the user")
+        threading.Thread(target=self._ramp, args=(gen, target, self.PAUSE_FADE_SECONDS, 5),
+                         kwargs={"abort_event": s.stop_event, "start": 0},
+                         daemon=True, name="Resume").start()
+        return True
+
+    def toggle_pause(self):
+        return self.resume() if self.paused else self.pause()
+
+    def seek(self, seconds):
+        """Jump to `seconds` in the current track (clamped). Returns True if it did."""
+        with self._lock:
+            s = self._controllable()
+            if s is None:
+                return False
+            try:
+                length_ms = self.media_player.get_length() or 0
+                ms = max(0, int(seconds * 1000))
+                if length_ms > 0:
+                    ms = min(ms, max(0, length_ms - 500))
+                self.media_player.set_time(ms)
+            except Exception:
+                log.warning("VLC seek failed", exc_info=True)
+                return False
+        return True
+
+    def set_level(self, target_vol):
+        """Change the volume now (Max Volume or duck level changed while playing).
+        While paused only the level to resume at changes."""
+        with self._lock:
+            s = self._controllable()
+            if s is None:
+                if self._session is not None:
+                    self._target_vol = max(0, min(100, target_vol))
+                return
+            if s.paused:
+                self._target_vol = max(0, min(100, target_vol))
+                return
+        self._start_level_ramp(target_vol, self.LEVEL_SECONDS, 5, "level")
 
     @property
     def resume_state(self):
@@ -266,6 +361,8 @@ class AmbientPlayer:
             self._target_vol = max(0, min(100, target_vol))
             if not s.track_started.is_set():
                 return   # the track's fade-in will go to the new target
+            if s.paused:
+                return   # resume() fades to the new target
             gen = self._new_ramp()
         threading.Thread(target=self._ramp,
                          args=(gen, target_vol, secs, steps),
@@ -532,7 +629,8 @@ class AmbientPlayer:
         return not s.stop_event.is_set()
 
     def _wait_for_track_end(self, s):
-        while not s.stop_event.is_set() and self._is_playing():
+        # A paused track is not finished: VLC reports "not playing" while paused.
+        while not s.stop_event.is_set() and (self._is_playing() or s.paused):
             s.stop_event.wait(self.POLL_SECONDS)
 
     def _run_single(self, s, path, max_vol, loop_mode):

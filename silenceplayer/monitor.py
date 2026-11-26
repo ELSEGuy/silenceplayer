@@ -63,6 +63,7 @@ class AudioMonitor:
         self._get_playing_apps = playing_apps_source or get_playing_apps
         self._clock = clock
         self.info = MonitorInfo("starting")
+        self._play_now = threading.Event()
 
     @property
     def running(self):
@@ -118,6 +119,7 @@ class AudioMonitor:
             return
         log.info("Monitoring started")
         self.info = MonitorInfo("starting")
+        self._play_now.clear()
         state = _MonitorState()
         self.app.set_status("Monitoring... waiting for silence.")
         while not stop_event.wait(self.POLL_INTERVAL):
@@ -181,6 +183,25 @@ class AudioMonitor:
                      ", ".join(suspects))
             self.app.on_suspected_mirror(suspects)
 
+    def play_now(self):
+        """Start the ambient sound on the next check, without waiting for
+        silence (the Play button). Ignored while it's already playing."""
+        self._play_now.set()
+
+    def _start_ambient(self, s, settings, now, stop_event):
+        app, player = self.app, self.app.player
+        if app.play_ambient():
+            self.info = MonitorInfo("playing")
+            s.ambient_triggered = True
+            s.ambient_started_at = now
+            s.cooldown_until = now + settings.fade_secs + 2.0
+            s.ducked = False
+            s.unduck_start = None
+        else:
+            s.silence_start = None
+            reason = player.last_error or "Could not start ambient sound — monitoring stopped."
+            self._stop_from_worker(stop_event, reason)
+
     def _tick(self, s, stop_event):
         app = self.app
         settings = runtime_settings(app.config)
@@ -189,7 +210,8 @@ class AudioMonitor:
             return
         player = app.player
         now = self._clock()
-        if s.ambient_triggered or self._ambient_audible(player):
+        paused = bool(getattr(player, "paused", False))
+        if (s.ambient_triggered and not paused) or self._ambient_audible(player):
             s.ambient_audible_at = now
         excluded_audible = getattr(raw_apps, "excluded_audible", None)
         can_mirror = bool(excluded_audible) or (
@@ -200,6 +222,7 @@ class AudioMonitor:
         apps = tuple(sorted(current_apps))
 
         if s.ambient_triggered:
+            self._play_now.clear()          # already playing
             if now < s.cooldown_until:
                 self.info = MonitorInfo("playing")
                 app.set_status("Playing ambient sound...")
@@ -259,7 +282,11 @@ class AudioMonitor:
                     self.info = MonitorInfo("playing")
                     app.set_status("Playing ambient sound...")
         else:
-            if current_apps:
+            if self._play_now.is_set():
+                self._play_now.clear()
+                log.info("Play pressed; starting ambient now")
+                self._start_ambient(s, settings, now, stop_event)
+            elif current_apps:
                 s.silence_start = None
                 self.info = MonitorInfo("audio", apps=apps)
                 app.set_status(f"Audio playing ({names}). Monitoring...")
@@ -269,17 +296,7 @@ class AudioMonitor:
                 elapsed = now - s.silence_start
                 if elapsed >= settings.silence_secs:
                     log.info("Silent for %.0fs; starting ambient", elapsed)
-                    if app.play_ambient():
-                        self.info = MonitorInfo("playing")
-                        s.ambient_triggered = True
-                        s.ambient_started_at = now
-                        s.cooldown_until = now + settings.fade_secs + 2.0
-                        s.ducked = False
-                        s.unduck_start = None
-                    else:
-                        s.silence_start = None
-                        reason = player.last_error or "Could not start ambient sound — monitoring stopped."
-                        self._stop_from_worker(stop_event, reason)
+                    self._start_ambient(s, settings, now, stop_event)
                 else:
                     remaining = settings.silence_secs - elapsed
                     self.info = MonitorInfo("waiting", remaining=remaining)

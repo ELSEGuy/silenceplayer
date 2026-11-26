@@ -80,6 +80,14 @@ class FakeMediaPlayer:
         with self.lock:
             return 1 if self.state == State.Playing else 0
 
+    def set_pause(self, on):
+        with self.lock:
+            if on and self.state == State.Playing:
+                self.state = State.Paused
+            elif not on and self.state == State.Paused:
+                self.state = State.Playing
+            self.events.append(("pause", bool(on)))
+
     def get_state(self):
         with self.lock:
             return self.state

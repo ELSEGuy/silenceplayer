@@ -24,12 +24,13 @@ from ..config import (
     load_config,
     normalize_app_name,
     parse_int_field,
+    runtime_settings,
     save_config,
 )
 from ..logs import log, log_throttled
 from ..mirror import PROCTAP_IMPORT_ERROR, MirrorFix
 from ..monitor import AudioMonitor
-from ..nowplaying import describe_now_playing
+from ..nowplaying import describe_now_playing, format_clock
 from ..paths import resource_path
 from ..player import AmbientPlayer
 from ..sources import display_name, validate_ambient_source
@@ -40,7 +41,7 @@ from ..updates import RELEASES_URL, UpdateChecker, current_version
 
 
 class App:
-    WINDOW_W, WINDOW_H = 520, 760
+    WINDOW_W, WINDOW_H = 520, 800
     UI_POLL_MS = 50
 
     def __init__(self, root, instance=None, config_notice=None, config=None):
@@ -422,6 +423,8 @@ class App:
         now = self._now or describe_now_playing(self.monitoring, self.monitor.info,
                                                 self.player.track_info(), self.config)
         items = [("Open Settings", self._show_window)]
+        if now.kind in ("playing", "ducked", "paused"):
+            items.append(("Resume" if now.kind == "paused" else "Pause", self._np_toggle_play))
         if self._update_info is not None:
             items.append((f"Download v{self._update_info.version}", self._open_update))
         items.append(("Stop Monitoring" if self.monitoring else "Start Monitoring",
@@ -626,7 +629,7 @@ class App:
                                              x=10, anchor="w")
 
     def _build_main_tab(self, parent, BG, CARD, FG, ACC, BTN_BG, DIM, label, entry, button):
-        self._build_now_playing(parent, CARD, FG, DIM)
+        self._build_now_playing(parent, CARD, FG, DIM, BTN_BG, ACC)
 
         mode_frame = tk.Frame(parent, bg=BG)
         mode_frame.pack(pady=(8, 0))
@@ -806,7 +809,10 @@ class App:
 
         def on_duck_change(val):
             v = int(float(val))
+            changed = self.config.get("duck_percent") != v
             self.config["duck_percent"] = v
+            if changed:
+                self._apply_live_levels()
             if v == 0:
                 self.duck_label.config(text="Stop (0%)")
             elif v == 100:
@@ -820,6 +826,7 @@ class App:
                  highlightthickness=0, sliderrelief="flat",
                  length=460, showvalue=False).pack(fill="x")
         on_duck_change(self.duck_var.get())
+        self._on_duck_change = on_duck_change
 
         btn_frame = tk.Frame(parent, bg=BG)
         btn_frame.pack(pady=6)
@@ -835,11 +842,12 @@ class App:
     NOW_COLORS = {             # badge background, badge text, title colour
         "playing": ("#a6e3a1", "#1e1e2e", "#cdd6f4"),
         "ducked":  ("#f9e2af", "#1e1e2e", "#cdd6f4"),
+        "paused":  ("#89b4fa", "#1e1e2e", "#cdd6f4"),
         "waiting": ("#313244", "#a6adc8", "#7f849c"),
         "off":     ("#313244", "#6c7086", "#7f849c"),
     }
 
-    def _build_now_playing(self, parent, CARD, FG, DIM):
+    def _build_now_playing(self, parent, CARD, FG, DIM, BTN_BG, ACC):
         card = tk.Frame(parent, bg=CARD, padx=8, pady=10)
         card.pack(fill="x", padx=24, pady=(10, 0))
         head = tk.Frame(card, bg=CARD)
@@ -855,18 +863,137 @@ class App:
         self.np_detail = tk.Label(card, text="", bg=CARD, fg=DIM, font=("Segoe UI", 9),
                                   anchor="w")
         self.np_detail.pack(fill="x", padx=8)
-        self.np_bar = tk.Canvas(card, height=4, bg="#313244", highlightthickness=0, bd=0)
-        self.np_bar.pack(fill="x", padx=8, pady=(8, 0))
-        self._np_fill = self.np_bar.create_rectangle(0, 0, 0, 4, width=0, fill="#a6e3a1")
+
+        # Progress bar: click or drag to jump to another point of the track.
+        self.np_bar = tk.Canvas(card, height=14, bg=CARD, highlightthickness=0, bd=0,
+                                cursor="hand2")
+        self.np_bar.pack(fill="x", padx=8, pady=(6, 0))
+        self._np_track = self.np_bar.create_rectangle(0, 5, 0, 9, width=0, fill="#313244")
+        self._np_fill = self.np_bar.create_rectangle(0, 5, 0, 9, width=0, fill="#a6e3a1")
+        self._np_knob = self.np_bar.create_oval(0, 2, 10, 12, width=0, fill="#cdd6f4",
+                                                state="hidden")
+        self._np_drag = None          # 0..1 while the bar is being dragged
         self.np_bar.bind("<Configure>", lambda e: self._draw_np_bar())
+        self.np_bar.bind("<ButtonPress-1>", self._np_drag_to)
+        self.np_bar.bind("<B1-Motion>", self._np_drag_to)
+        self.np_bar.bind("<ButtonRelease-1>", self._np_drop)
+
+        # Controls: back 10 s, play/pause, forward 10 s, volume (= Max Volume).
+        controls = tk.Frame(card, bg=CARD)
+        controls.pack(fill="x", padx=8, pady=(6, 0))
+
+        def control(text, command, width):
+            return tk.Button(controls, text=text, command=command, width=width,
+                             bg=BTN_BG, fg=FG, activebackground="#45475a",
+                             activeforeground=FG, relief="flat", bd=0,
+                             font=("Segoe UI Symbol", 10), cursor="hand2")
+
+        self.np_back_btn = control("\u27f2 10", lambda: self._np_skip(-10), 5)
+        self.np_back_btn.pack(side="left")
+        self.np_play_btn = control("\u25b6", self._np_toggle_play, 4)
+        self.np_play_btn.pack(side="left", padx=6)
+        self.np_fwd_btn = control("10 \u27f3", lambda: self._np_skip(10), 5)
+        self.np_fwd_btn.pack(side="left")
+
+        self.np_vol_label = tk.Label(controls, bg=CARD, fg=DIM, font=("Segoe UI", 9), width=4,
+                                     anchor="e")
+        self.np_vol_label.pack(side="right")
+        self.np_vol_var = tk.IntVar(value=int(self.config.get("max_volume", 50)))
+        self.np_vol = tk.Scale(controls, from_=0, to=100, orient="horizontal",
+                               variable=self.np_vol_var, command=self._np_volume_changed,
+                               bg=CARD, fg=FG, troughcolor=BTN_BG, activebackground=ACC,
+                               highlightthickness=0, sliderrelief="flat", length=150,
+                               showvalue=False, sliderlength=14, width=10, bd=0)
+        self.np_vol.pack(side="right", padx=(4, 4))
+        tk.Label(controls, text="\U0001f50a", bg=CARD, fg=DIM,
+                 font=("Segoe UI Symbol", 10)).pack(side="right")
+        self.np_vol_label.config(text=f"{self.np_vol_var.get()}%")
 
     def _draw_np_bar(self):
         now = self._now
         frac = now.progress if now is not None and now.progress is not None else 0.0
+        if self._np_drag is not None:
+            frac = self._np_drag
         color = self.NOW_COLORS.get(now.kind if now else "off")[0]
-        width = self.np_bar.winfo_width()
-        self.np_bar.coords(self._np_fill, 0, 0, round(width * frac), 4)
+        width = max(1, self.np_bar.winfo_width())
+        x = round(width * frac)
+        self.np_bar.coords(self._np_track, 0, 5, width, 9)
+        self.np_bar.coords(self._np_fill, 0, 5, x, 9)
         self.np_bar.itemconfig(self._np_fill, fill=color)
+        show_knob = now is not None and now.progress is not None
+        knob_x = min(max(x, 5), width - 5)
+        self.np_bar.coords(self._np_knob, knob_x - 5, 2, knob_x + 5, 12)
+        self.np_bar.itemconfig(self._np_knob, state="normal" if show_knob else "hidden")
+
+    # ── playback controls ──
+
+    def _np_track_length(self):
+        info = self.player.track_info()
+        return info.length if info is not None and info.length else None
+
+    def _np_drag_to(self, event):
+        if self._np_track_length() is None:
+            return
+        width = max(1, self.np_bar.winfo_width())
+        self._np_drag = min(1.0, max(0.0, event.x / width))
+        length = self._np_track_length()
+        if length:
+            self.np_detail.config(text=f"{format_clock(self._np_drag * length)} / "
+                                       f"{format_clock(length)}")
+        self._draw_np_bar()
+
+    def _np_drop(self, event):
+        frac, self._np_drag = self._np_drag, None
+        length = self._np_track_length()
+        if frac is not None and length:
+            self.player.seek(frac * length)
+        self._refresh_now_playing_once()
+        self._draw_np_bar()             # from the real position again
+
+    def _np_skip(self, seconds):
+        info = self.player.track_info()
+        if info is None or info.position is None:
+            return
+        self.player.seek(info.position + seconds)
+        self._refresh_now_playing_once()
+
+    def _np_toggle_play(self):
+        if not self.monitoring:
+            self.set_status("Start Monitoring first: Silence Player plays when the PC is quiet.")
+            return
+        if self.player.track_info() is not None:
+            self.player.toggle_pause()
+        else:
+            self.monitor.play_now()
+            self.set_status("Starting the ambient sound...")
+        self._refresh_now_playing_once()
+
+    def _np_volume_changed(self, value):
+        """The card's volume slider is Max Volume: it applies right away (and is
+        saved with Save Settings, like every other setting)."""
+        v = int(float(value))
+        self.np_vol_label.config(text=f"{v}%")
+        if self.config.get("max_volume") == v:
+            return
+        self.config["max_volume"] = v
+        self.vol_var.set(str(v))
+        self.vol_entry.config(fg=self._FG)
+        self._apply_live_levels()
+
+    def _apply_live_levels(self):
+        """Max Volume or the duck level changed: move the playing sound there now."""
+        settings = runtime_settings(self.config)
+        ducked = self.monitoring and self.monitor.info.phase == "ducked"
+        target = settings.max_vol * (settings.duck_percent / 100.0 if ducked else 1.0)
+        self.player.set_level(target)
+
+    def _refresh_now_playing_once(self):
+        try:
+            now = describe_now_playing(self.monitoring, self.monitor.info,
+                                       self.player.track_info(), self.config)
+            self._show_now_playing(now)
+        except Exception:
+            log.debug("Now playing refresh failed", exc_info=True)
 
     def _refresh_now_playing(self):
         if not self._ui_alive:
@@ -891,7 +1018,9 @@ class App:
         if self.np_title_var.get() != now.title:     # writing restarts the scroll
             self.np_title_var.set(now.title)
         self.np_title.set_fg(title_fg)
-        self.np_detail.config(text=now.detail)
+        if self._np_drag is None:
+            self.np_detail.config(text=now.detail)
+        self.np_play_btn.config(text="\u275a\u275a" if now.kind in ("playing", "ducked") else "\u25b6")
         self._draw_np_bar()
         if self._tray_menu is not None and self._tray_menu.is_open:
             self._tray_menu.update_header(now.menu_head, now.menu_line, now.kind)
@@ -1270,9 +1399,14 @@ class App:
         return errors
 
     def _commit_inputs_quietly(self):
+        before = self.config.get("max_volume")
         errors = self._commit_inputs()
         if errors:
             self.set_status(errors[0])
+        if self.config.get("max_volume") != before:
+            self.np_vol_var.set(int(self.config["max_volume"]))
+            self.np_vol_label.config(text=f"{self.config['max_volume']}%")
+            self._apply_live_levels()
 
     def _revert_invalid_fields(self):
         self.silence_var.set(str(self.config["silence_seconds"]))

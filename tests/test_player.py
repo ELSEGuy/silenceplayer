@@ -414,3 +414,100 @@ def test_audible_until_fade_out_has_finished(player_factory, make_config, audio_
     assert not player.playing and player.audible       # fading out
     _wait_finished(player)
     assert not player.audible
+
+
+# ── user controls: pause / resume / seek / live level ────────────────────────
+
+def _playing_single(player_factory, make_config, audio_files, **cfg):
+    folder, (rain,) = audio_files("rain.mp3")
+    c = make_config(mode="single", mp3_path=rain, fade_enabled=False, **cfg)
+    app, player, mp = player_factory(c)
+    player.play(c)
+    _wait_loaded(mp, 1, player)
+    return c, player, mp
+
+
+def test_pause_fades_out_then_pauses_and_resume_fades_back(player_factory, make_config,
+                                                           audio_files, fast_timing):
+    c, player, mp = _playing_single(player_factory, make_config, audio_files, max_volume=80)
+    assert wait_until(lambda: mp.volume == 80)
+    assert player.pause()
+    assert player.paused and not player.audible
+    assert wait_until(lambda: ("pause", True) in mp.events)
+    assert mp.volume == 0
+    assert player.track_info().paused
+    assert player.playing, "a paused track is still the current session"
+
+    time.sleep(0.2)                       # the track must not be treated as ended
+    assert player._session is not None and len(mp.loads) == 1
+
+    assert player.resume()
+    assert not player.paused and player.audible
+    assert ("pause", False) in mp.events
+    assert wait_until(lambda: mp.volume == 80)
+    assert not player.track_info().paused
+    player.stop(wait=True, timeout=3)
+
+
+def test_toggle_pause_and_nothing_to_control(player_factory, make_config, audio_files,
+                                             fast_timing):
+    folder, (rain,) = audio_files("rain.mp3")
+    c = make_config(mode="single", mp3_path=rain, fade_enabled=False)
+    app, player, mp = player_factory(c)
+    assert not player.pause() and not player.resume() and not player.seek(10)
+    player.play(c)
+    _wait_loaded(mp, 1, player)
+    player.toggle_pause()
+    assert player.paused
+    player.toggle_pause()
+    assert not player.paused
+    player.stop(wait=True, timeout=3)
+
+
+def test_stop_while_paused_ends_the_session(player_factory, make_config, audio_files,
+                                            fast_timing):
+    c, player, mp = _playing_single(player_factory, make_config, audio_files)
+    player.pause()
+    assert wait_until(lambda: ("pause", True) in mp.events)
+    player.stop(wait=True, timeout=3)
+    assert wait_until(lambda: player._session is None)
+    assert not player.paused
+
+
+def test_seek_is_clamped_to_the_track(player_factory, make_config, audio_files,
+                                      fast_timing):
+    c, player, mp = _playing_single(player_factory, make_config, audio_files)
+    assert player.seek(42.5)
+    assert mp.position_ms == 42_500
+    player.seek(-30)
+    assert mp.position_ms == 0
+    player.seek(10_000)                   # past the end of the 600 s track
+    assert mp.position_ms == 600_000 - 500
+    player.stop(wait=True, timeout=3)
+
+
+def test_set_level_moves_the_volume_while_playing(player_factory, make_config,
+                                                  audio_files, fast_timing):
+    c, player, mp = _playing_single(player_factory, make_config, audio_files, max_volume=80)
+    assert wait_until(lambda: mp.volume == 80)
+    player.set_level(35)
+    assert wait_until(lambda: mp.volume == 35)
+    player.duck(10)
+    assert wait_until(lambda: mp.volume == 10)
+    player.set_level(20)                  # the duck level changed while ducked
+    assert wait_until(lambda: mp.volume == 20)
+    player.stop(wait=True, timeout=3)
+
+
+def test_set_level_while_paused_applies_on_resume(player_factory, make_config,
+                                                  audio_files, fast_timing):
+    c, player, mp = _playing_single(player_factory, make_config, audio_files, max_volume=80)
+    player.pause()
+    assert wait_until(lambda: ("pause", True) in mp.events)
+    player.set_level(30)
+    player.duck(15)                       # the monitor ducking while paused
+    time.sleep(0.1)
+    assert mp.volume == 0, "paused sound must stay silent"
+    player.resume()
+    assert wait_until(lambda: mp.volume == 15)
+    player.stop(wait=True, timeout=3)
