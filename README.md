@@ -31,6 +31,7 @@
 - 💬 Mirroring Fix for Discord, SignalRGB, Wallpaper Engine and more
 - 🖥️ Runs quietly in the Windows system tray, and can start with Windows
 - 🔔 Tells you when a new version is out
+- ▶️ Shows what's playing, in the window and on the tray icon
 - 💾 Saves your settings when you click Save Settings
 - 🎧 Supports MP3, M4A, OPUS, FLAC and MP4
 

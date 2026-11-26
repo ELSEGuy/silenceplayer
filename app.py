@@ -13,6 +13,7 @@ import logging
 import queue
 import tempfile
 import copy
+import math
 import re
 import webbrowser
 from logging.handlers import RotatingFileHandler
@@ -1413,6 +1414,18 @@ class _MonitorState:
         self.mirror_note       = (frozenset(), frozenset())   # what we last logged
 
 
+class MonitorInfo(NamedTuple):
+    """What the monitor is doing, for the "Now playing" display.
+
+    phase: "starting", "waiting" (silence countdown), "audio" (other apps are
+    playing), "playing", or "ducked" (playing quieter).
+    """
+    phase: str
+    remaining: float = None     # seconds left of a countdown (waiting / unducking)
+    apps: tuple = ()            # apps that are playing (audio / ducked)
+    duck_percent: int = 0
+
+
 class AudioMonitor:
     """Watches system audio and starts/stops/ducks the ambient player.
 
@@ -1431,6 +1444,7 @@ class AudioMonitor:
         self._stop_event = None
         self._get_playing_apps = playing_apps_source or get_playing_apps
         self._clock = clock
+        self.info = MonitorInfo("starting")
 
     @property
     def running(self):
@@ -1485,6 +1499,7 @@ class AudioMonitor:
         if stop_event.is_set():
             return
         log.info("Monitoring started")
+        self.info = MonitorInfo("starting")
         state = _MonitorState()
         self.app.set_status("Monitoring... waiting for silence.")
         while not stop_event.wait(self.POLL_INTERVAL):
@@ -1564,9 +1579,11 @@ class AudioMonitor:
         current_apps = self._apply_mirror_fix(raw_apps, settings, can_mirror)
         self._log_mirror_decision(s, raw_apps, current_apps, settings, can_mirror)
         names = ", ".join(sorted(current_apps))
+        apps = tuple(sorted(current_apps))
 
         if s.ambient_triggered:
             if now < s.cooldown_until:
+                self.info = MonitorInfo("playing")
                 app.set_status("Playing ambient sound...")
                 return
 
@@ -1587,6 +1604,7 @@ class AudioMonitor:
                     app.stop_ambient()
                     s.ambient_triggered = False
                     s.silence_start = None
+                    self.info = MonitorInfo("audio", apps=apps)
                     app.set_status(f"External audio detected ({names}) — ambient stopped.")
                 else:
                     if not s.ducked:
@@ -1599,6 +1617,8 @@ class AudioMonitor:
                         app.duck_ambient(duck_vol)
                     else:
                         s.unduck_start = None
+                    self.info = MonitorInfo("ducked", apps=apps,
+                                            duck_percent=int(settings.duck_percent))
                     app.set_status(
                         f"External audio detected — ambient ducked to {int(settings.duck_percent)}%.")
             else:
@@ -1607,18 +1627,23 @@ class AudioMonitor:
                         s.unduck_start = now
                     remaining = settings.silence_secs - (now - s.unduck_start)
                     if remaining > 0:
+                        self.info = MonitorInfo("ducked", remaining=remaining,
+                                                duck_percent=int(settings.duck_percent))
                         app.set_status(f"Silence returned — fading back up in {remaining:.0f}s")
                     else:
                         s.ducked = False
                         s.unduck_start = None
                         log.info("Silence returned; restoring ambient volume")
                         app.unduck_ambient(settings.max_vol)
+                        self.info = MonitorInfo("playing")
                         app.set_status("Playing ambient sound...")
                 else:
+                    self.info = MonitorInfo("playing")
                     app.set_status("Playing ambient sound...")
         else:
             if current_apps:
                 s.silence_start = None
+                self.info = MonitorInfo("audio", apps=apps)
                 app.set_status(f"Audio playing ({names}). Monitoring...")
             else:
                 if s.silence_start is None:
@@ -1627,6 +1652,7 @@ class AudioMonitor:
                 if elapsed >= settings.silence_secs:
                     log.info("Silent for %.0fs; starting ambient", elapsed)
                     if app.play_ambient():
+                        self.info = MonitorInfo("playing")
                         s.ambient_triggered = True
                         s.ambient_started_at = now
                         s.cooldown_until = now + settings.fade_secs + 2.0
@@ -1638,6 +1664,7 @@ class AudioMonitor:
                         self._stop_from_worker(stop_event, reason)
                 else:
                     remaining = settings.silence_secs - elapsed
+                    self.info = MonitorInfo("waiting", remaining=remaining)
                     app.set_status(f"Silence detected... playing in {remaining:.0f}s")
 
 
@@ -1717,6 +1744,12 @@ class _SessionVolume:
                 return False
 
 
+class TrackInfo(NamedTuple):
+    path: str
+    position: float = None
+    length: float = None
+
+
 class _PlaybackSession:
     """One play() call. Owns the VLC player from start until its thread exits."""
 
@@ -1779,6 +1812,26 @@ class AmbientPlayer:
         with self._lock:
             s = self._session
             return s is not None and not s.finished and not s.stop_event.is_set()
+
+    def track_info(self):
+        """(path, position_s, length_s) of what is playing, or None. Times are
+        None until VLC knows them."""
+        with self._lock:
+            s = self._session
+            if s is None:
+                return None
+            path, started = s.current_path, s.track_started.is_set()
+        pos = length = None
+        if started:
+            try:
+                ms = self.media_player.get_time()
+                pos = ms / 1000.0 if ms is not None and ms >= 0 else None
+                ms = self.media_player.get_length()
+                length = ms / 1000.0 if ms is not None and ms > 0 else None
+            except Exception:
+                log_throttled("vlc_track_info", logging.DEBUG, "VLC time query failed",
+                              exc_info=True, interval=300)
+        return TrackInfo(path, pos, length)
 
     @property
     def audible(self):
@@ -2184,6 +2237,100 @@ class AmbientPlayer:
 # UI
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Now playing
+# ─────────────────────────────────────────────────────────────────────────────
+
+TRAY_TIP_MAX = 127      # Windows cuts tray tooltips at 127 characters
+TRAY_MENU_MAX = 60
+
+
+class NowPlaying(NamedTuple):
+    badge: str          # "Playing", "Ducked 50%", "Waiting", "Off"
+    kind: str           # "playing", "ducked", "waiting", "off": picks the colours
+    title: str          # file name
+    detail: str         # time, countdown or reason
+    progress: float     # 0..1, or None for no bar
+    tooltip: str        # tray icon tooltip
+    menu: str           # first (greyed) line of the tray menu
+
+
+def format_clock(seconds):
+    seconds = max(0, int(seconds))
+    h, rest = divmod(seconds, 3600)
+    m, s = divmod(rest, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def _shorten(text, limit):
+    return text if len(text) <= limit else text[:max(1, limit - 1)].rstrip() + "…"
+
+
+def _apps_text(apps):
+    apps = list(apps)
+    if not apps:
+        return ""
+    if len(apps) <= 2:
+        return " and ".join(apps)
+    return f"{apps[0]} and {len(apps) - 1} more"
+
+
+def describe_now_playing(monitoring, info, track, config):
+    """What the tray tooltip, tray menu and the window's card should show."""
+    if track is not None and track.path:
+        name = display_name(track.path)
+    elif config.get("mode", "single") == "playlist":
+        name = display_name(config.get("playlist_folder", ""))
+    else:
+        name = display_name(config.get("mp3_path", ""))
+    name = name or "No file chosen"
+
+    def tip(line):
+        head = "Silence Player\n"
+        return head + _shorten(line, TRAY_TIP_MAX - len(head))
+
+    def menu(prefix):
+        return prefix + _shorten(name, TRAY_MENU_MAX - len(prefix))
+
+    def clock_and_bar():
+        if track is None or track.position is None:
+            return "Starting…", None
+        if track.length:
+            frac = max(0.0, min(1.0, track.position / track.length))
+            return f"{format_clock(track.position)} / {format_clock(track.length)}", frac
+        return format_clock(track.position), None
+
+    if not monitoring:
+        return NowPlaying("Off", "off", name, "Monitoring is off", None,
+                          tip("Monitoring is off"), "Monitoring is off")
+    phase = info.phase if info is not None else "starting"
+
+    if phase == "playing":
+        detail, bar = clock_and_bar()
+        return NowPlaying("Playing", "playing", name, detail, bar,
+                          tip(f"Playing: {name}"), menu("Playing: "))
+    if phase == "ducked":
+        clock, bar = clock_and_bar()
+        if info.apps:
+            why = f"{_apps_text(info.apps)} is playing"
+        elif info.remaining is not None:
+            why = f"back to full volume in {math.ceil(info.remaining)}s"
+        else:
+            why = "another app is playing"
+        return NowPlaying(f"Ducked {info.duck_percent}%", "ducked", name, f"{clock} · {why}",
+                          bar, tip(f"Quieter: {name}"), menu("Quieter: "))
+    if phase == "audio":
+        apps = _apps_text(info.apps)
+        return NowPlaying("Waiting", "waiting", name, f"{apps} is playing", None,
+                          tip(f"Waiting: {apps} is playing"), "Waiting for silence")
+    if phase == "waiting" and info.remaining is not None:
+        secs = max(1, math.ceil(info.remaining))
+        return NowPlaying("Waiting", "waiting", name, f"Plays in {secs}s if it stays silent",
+                          None, tip(f"Ambient in {secs}s"), "Waiting for silence")
+    return NowPlaying("Waiting", "waiting", name, "Listening…", None,
+                      tip("Listening…"), "Waiting for silence")
+
+
 class MarqueeLabel(tk.Canvas):
     """A one-line label that scrolls its text when it doesn't fit.
 
@@ -2243,6 +2390,10 @@ class MarqueeLabel(tk.Canvas):
     @property
     def scrolling(self):
         return self._scrolling
+
+    def set_fg(self, color):
+        for item in self._items:
+            self.itemconfig(item, fill=color)
 
     def _make_fades(self):
         r, g, b = (v // 256 for v in self.winfo_rgb(self._bg))
@@ -2322,7 +2473,7 @@ class MarqueeLabel(tk.Canvas):
 
 
 class App:
-    WINDOW_W, WINDOW_H = 520, 660
+    WINDOW_W, WINDOW_H = 520, 760
     UI_POLL_MS = 50
 
     def __init__(self, root, instance=None, config_notice=None, config=None):
@@ -2365,6 +2516,8 @@ class App:
         self._version    = current_version()
         if self._version != APP_VERSION:
             log.warning("Pretending to be version %s to test the update notice", self._version)
+        self._now = None                # last NowPlaying shown
+        self._tray_tip = None
         self._update_info  = None       # a newer release, while one is known
         self._update_later = set()      # tags the user said "Later" to (this session)
         self._update_notified = set()
@@ -2377,6 +2530,7 @@ class App:
         self._build_ui()
         self.root.after(self.UI_POLL_MS, self._drain_ui_queue)
         threading.Thread(target=self._build_tray, daemon=True, name="Tray").start()
+        self.root.after(0, self._refresh_now_playing)
         self.updater.start()
         if instance is not None:
             instance.listen(lambda: self.call_in_ui(self._show_window))
@@ -2658,6 +2812,9 @@ class App:
         try:
             icon_image = create_tray_icon()
             menu = pystray.Menu(
+                pystray.MenuItem(lambda item: self._now.menu if self._now else "Silence Player",
+                                 lambda icon, item: None, enabled=False),
+                pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Open Settings", self._tray_open, default=True),
                 pystray.MenuItem(
                     lambda item: (f"Download v{self._update_info.version}"
@@ -2670,7 +2827,9 @@ class App:
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Quit", self._tray_quit),
             )
-            self.tray = pystray.Icon("SilencePlayer", icon_image, "Silence Player", menu)
+            tip = self._now.tooltip if self._now else "Silence Player"
+            self.tray = pystray.Icon("SilencePlayer", icon_image, tip, menu)
+            self._tray_tip = tip
             self.tray.run()
         except Exception:
             log.exception("System tray icon failed")
@@ -2883,6 +3042,8 @@ class App:
                                              x=10, anchor="w")
 
     def _build_main_tab(self, parent, BG, CARD, FG, ACC, BTN_BG, DIM, label, entry, button):
+        self._build_now_playing(parent, CARD, FG, DIM)
+
         mode_frame = tk.Frame(parent, bg=BG)
         mode_frame.pack(pady=(8, 0))
         label(mode_frame, "Mode:", bold=True).pack(side="left", padx=(0, 8))
@@ -3084,6 +3245,80 @@ class App:
 
         _refresh_mode()
         self._refresh_path_fields()
+
+    # ── Now playing ──
+
+    NOW_COLORS = {             # badge background, badge text, title colour
+        "playing": ("#a6e3a1", "#1e1e2e", "#cdd6f4"),
+        "ducked":  ("#f9e2af", "#1e1e2e", "#cdd6f4"),
+        "waiting": ("#313244", "#a6adc8", "#7f849c"),
+        "off":     ("#313244", "#6c7086", "#7f849c"),
+    }
+
+    def _build_now_playing(self, parent, CARD, FG, DIM):
+        card = tk.Frame(parent, bg=CARD, padx=8, pady=10)
+        card.pack(fill="x", padx=24, pady=(10, 0))
+        head = tk.Frame(card, bg=CARD)
+        head.pack(fill="x", padx=8)
+        tk.Label(head, text="Now playing", bg=CARD, fg=FG,
+                 font=("Segoe UI", 10, "bold")).pack(side="left")
+        self.np_badge = tk.Label(head, text="Off", font=("Segoe UI", 8, "bold"), padx=7, pady=1)
+        self.np_badge.pack(side="right")
+        self.np_title_var = tk.StringVar(value="")
+        self.np_title = MarqueeLabel(card, self.np_title_var, width_chars=48, bg=CARD, fg=FG,
+                                     font=("Segoe UI", 11))
+        self.np_title.pack(anchor="w", pady=(4, 0))
+        self.np_detail = tk.Label(card, text="", bg=CARD, fg=DIM, font=("Segoe UI", 9),
+                                  anchor="w")
+        self.np_detail.pack(fill="x", padx=8)
+        self.np_bar = tk.Canvas(card, height=4, bg="#313244", highlightthickness=0, bd=0)
+        self.np_bar.pack(fill="x", padx=8, pady=(8, 0))
+        self._np_fill = self.np_bar.create_rectangle(0, 0, 0, 4, width=0, fill="#a6e3a1")
+        self.np_bar.bind("<Configure>", lambda e: self._draw_np_bar())
+
+    def _draw_np_bar(self):
+        now = self._now
+        frac = now.progress if now is not None and now.progress is not None else 0.0
+        color = self.NOW_COLORS.get(now.kind if now else "off")[0]
+        width = self.np_bar.winfo_width()
+        self.np_bar.coords(self._np_fill, 0, 0, round(width * frac), 4)
+        self.np_bar.itemconfig(self._np_fill, fill=color)
+
+    def _refresh_now_playing(self):
+        if not self._ui_alive:
+            return
+        try:
+            now = describe_now_playing(self.monitoring, self.monitor.info,
+                                       self.player.track_info(), self.config)
+            self._show_now_playing(now)
+        except Exception:
+            log_throttled("now_playing", logging.WARNING, "Now playing refresh failed",
+                          exc_info=True, interval=300)
+        self.root.after(self.NOW_PLAYING_MS, self._refresh_now_playing)
+
+    NOW_PLAYING_MS = 500
+
+    def _show_now_playing(self, now):
+        old, self._now = self._now, now
+        if now == old:
+            return
+        badge_bg, badge_fg, title_fg = self.NOW_COLORS[now.kind]
+        self.np_badge.config(text=now.badge, bg=badge_bg, fg=badge_fg)
+        if self.np_title_var.get() != now.title:     # writing restarts the scroll
+            self.np_title_var.set(now.title)
+        self.np_title.set_fg(title_fg)
+        self.np_detail.config(text=now.detail)
+        self._draw_np_bar()
+        tray = self.tray
+        if tray is not None:
+            if now.tooltip != self._tray_tip:
+                self._tray_tip = now.tooltip
+                try:
+                    tray.title = now.tooltip
+                except Exception:
+                    log.debug("Tray tooltip update failed", exc_info=True)
+            if old is None or now.menu != old.menu:
+                self._refresh_tray_menu()
 
     # ── Start with Windows (applied when Save Settings is clicked) ──
 

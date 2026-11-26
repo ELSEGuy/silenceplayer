@@ -1,0 +1,205 @@
+import threading
+
+import pytest
+
+from conftest import FakeApp, wait_until
+from test_monitor import Clock, StubPlayer, make_monitor
+from test_ui import cfg_path, make_app, pump, root  # noqa: F401  (fixtures too)
+
+FILE = "C:/Music/asmr/ANIMAL CROSSING OFFICE.opus"
+
+
+@pytest.fixture
+def cfg(make_config):
+    return make_config(mode="single", mp3_path=FILE)
+
+
+def describe(appmod, cfg, phase=None, track=None, monitoring=True, **info):
+    mi = appmod.MonitorInfo(phase, **info) if phase else None
+    return appmod.describe_now_playing(monitoring, mi, track, cfg)
+
+
+# ── what each state shows ────────────────────────────────────────────────────
+
+def test_playing(appmod, cfg):
+    np = describe(appmod, cfg, "playing", appmod.TrackInfo(FILE, 376.4, 724.0))
+    assert (np.badge, np.kind, np.title) == ("Playing", "playing", "ANIMAL CROSSING OFFICE.opus")
+    assert np.detail == "6:16 / 12:04"
+    assert np.progress == pytest.approx(376.4 / 724)
+    assert np.tooltip == "Silence Player\nPlaying: ANIMAL CROSSING OFFICE.opus"
+    assert np.menu == "Playing: ANIMAL CROSSING OFFICE.opus"
+
+
+def test_playing_before_vlc_knows_the_time(appmod, cfg):
+    np = describe(appmod, cfg, "playing", appmod.TrackInfo(FILE))
+    assert np.detail == "Starting…" and np.progress is None
+
+
+def test_ducked_names_the_app(appmod, cfg):
+    np = describe(appmod, cfg, "ducked", appmod.TrackInfo(FILE, 401, 724),
+                  apps=("discord.exe",), duck_percent=50)
+    assert np.badge == "Ducked 50%" and np.kind == "ducked"
+    assert np.detail == "6:41 / 12:04 · discord.exe is playing"
+    assert np.menu == "Quieter: ANIMAL CROSSING OFFICE.opus"
+
+
+def test_ducked_while_coming_back_up(appmod, cfg):
+    np = describe(appmod, cfg, "ducked", appmod.TrackInfo(FILE, 10, 724),
+                  remaining=7.2, duck_percent=50)
+    assert np.detail.endswith("back to full volume in 8s")
+
+
+def test_waiting_countdown(appmod, cfg):
+    np = describe(appmod, cfg, "waiting", remaining=17.4)
+    assert np.badge == "Waiting" and np.detail == "Plays in 18s if it stays silent"
+    assert np.tooltip == "Silence Player\nAmbient in 18s"
+    assert np.menu == "Waiting for silence"
+    assert np.title == "ANIMAL CROSSING OFFICE.opus"       # the chosen file, shown dimmed
+
+
+def test_other_audio_playing(appmod, cfg):
+    np = describe(appmod, cfg, "audio", apps=("discord.exe", "spotify.exe"))
+    assert np.detail == "discord.exe and spotify.exe is playing"
+    np = describe(appmod, cfg, "audio", apps=("a.exe", "b.exe", "c.exe"))
+    assert np.detail == "a.exe and 2 more is playing"
+
+
+def test_monitoring_off(appmod, cfg):
+    np = describe(appmod, cfg, "playing", monitoring=False)
+    assert (np.badge, np.kind, np.detail) == ("Off", "off", "Monitoring is off")
+
+
+def test_no_file_chosen(appmod, make_config):
+    np = appmod.describe_now_playing(False, None, None, make_config(mp3_path=""))
+    assert np.title == "No file chosen"
+
+
+def test_long_names_fit_windows_limits(appmod, make_config):
+    long = "C:/x/" + "very long ambient name " * 10 + ".opus"
+    cfg = make_config(mp3_path=long)
+    np = describe(appmod, cfg, "playing", appmod.TrackInfo(long, 1, 2))
+    assert len(np.tooltip) <= appmod.TRAY_TIP_MAX and np.tooltip.endswith("…")
+    assert len(np.menu) <= appmod.TRAY_MENU_MAX
+
+
+@pytest.mark.parametrize("secs,text", [(0, "0:00"), (65, "1:05"), (3725, "1:02:05"),
+                                       (-3, "0:00")])
+def test_format_clock(appmod, secs, text):
+    assert appmod.format_clock(secs) == text
+
+
+# ── the monitor reports its phase ────────────────────────────────────────────
+
+def test_monitor_phases(appmod, make_config):
+    clock = Clock()
+    apps = set()
+    app, mon = make_monitor(appmod, make_config, lambda ex: set(apps), clock=clock,
+                            silence_seconds=5, duck_percent=50)
+    state, ev = appmod._MonitorState(), threading.Event()
+    assert mon.info.phase == "starting"
+    mon._tick(state, ev)
+    assert mon.info.phase == "waiting" and mon.info.remaining == pytest.approx(5)
+    clock.t += 6
+    mon._tick(state, ev)
+    assert mon.info.phase == "playing"
+    clock.t += 10
+    apps.add("discord.exe")
+    mon._tick(state, ev)
+    assert mon.info == appmod.MonitorInfo("ducked", apps=("discord.exe",), duck_percent=50)
+    apps.clear()
+    mon._tick(state, ev)
+    assert mon.info.phase == "ducked" and mon.info.remaining == pytest.approx(5)
+    clock.t += 6
+    mon._tick(state, ev)
+    assert mon.info.phase == "playing"
+
+
+def test_monitor_reports_other_audio(appmod, make_config):
+    clock = Clock()
+    app, mon = make_monitor(appmod, make_config, lambda ex: {"spotify.exe"}, clock=clock)
+    mon._tick(appmod._MonitorState(), threading.Event())
+    assert mon.info == appmod.MonitorInfo("audio", apps=("spotify.exe",))
+
+
+# ── the player reports the track ─────────────────────────────────────────────
+
+def test_player_track_info(player_factory, make_config, audio_files, fast_timing):
+    folder, (rain,) = audio_files("rain.opus")
+    c = make_config(mode="single", mp3_path=rain, fade_enabled=False)
+    app, player, mp = player_factory(c)
+    assert player.track_info() is None
+    player.play(c)
+    assert wait_until(lambda: player._session is not None
+                      and player._session.track_started.is_set())
+    mp.position_ms = 90_500
+    info = player.track_info()
+    assert info.path == rain and info.position == pytest.approx(90.5)
+    assert info.length == pytest.approx(600)
+    player.stop(wait=True, timeout=3)
+    assert wait_until(lambda: player.track_info() is None)
+
+
+# ── in the app ───────────────────────────────────────────────────────────────
+
+class RecordingTray:
+    def __init__(self):
+        self.title = None
+        self.menu_updates = 0
+
+    def update_menu(self):
+        self.menu_updates += 1
+
+    def notify(self, *a):
+        pass
+
+    def stop(self):
+        pass
+
+
+def test_card_tooltip_and_menu_follow_the_state(appmod, root, cfg_path, fast_timing,
+                                                monkeypatch):
+    monkeypatch.setattr(appmod.App, "NOW_PLAYING_MS", 20)
+    a = make_app(appmod, root)
+    a.config["mp3_path"] = FILE
+    a.tray = tray = RecordingTray()
+    track = {"t": appmod.TrackInfo(FILE, 30, 120)}
+    a.player.track_info = lambda: track["t"]
+    a.monitoring = True
+    a.monitor.info = appmod.MonitorInfo("playing")
+    pump(root, 0.15)
+    assert a.np_badge.cget("text") == "Playing"
+    assert a.np_title_var.get() == "ANIMAL CROSSING OFFICE.opus"
+    assert a.np_detail.cget("text") == "0:30 / 2:00"
+    assert tray.title == "Silence Player\nPlaying: ANIMAL CROSSING OFFICE.opus"
+    menus = tray.menu_updates
+    assert menus >= 1
+
+    track["t"] = appmod.TrackInfo(FILE, 31, 120)            # time moves on
+    pump(root, 0.1)
+    assert a.np_detail.cget("text") == "0:31 / 2:00"
+    assert tray.menu_updates == menus, "menu is rebuilt only when its text changes"
+
+    a.monitor.info = appmod.MonitorInfo("ducked", apps=("discord.exe",), duck_percent=50)
+    pump(root, 0.1)
+    assert a.np_badge.cget("text") == "Ducked 50%"
+    assert tray.title.endswith("Quieter: ANIMAL CROSSING OFFICE.opus")
+    assert tray.menu_updates == menus + 1
+    a.monitor.stop(wait=True)
+
+
+def test_title_is_not_rewritten_every_refresh(appmod, root, cfg_path, fast_timing,
+                                              monkeypatch):
+    """Rewriting the name would restart its scrolling twice a second."""
+    monkeypatch.setattr(appmod.App, "NOW_PLAYING_MS", 20)
+    a = make_app(appmod, root)
+    writes = []
+    a.np_title_var.trace_add("write", lambda *x: writes.append(1))
+    a.monitoring = True
+    a.monitor.info = appmod.MonitorInfo("playing")
+    t = {"pos": 1}
+    a.player.track_info = lambda: appmod.TrackInfo(FILE, t["pos"], 100)
+    for i in range(5):
+        t["pos"] = i + 1
+        pump(root, 0.05)
+    assert len(writes) == 1
+    a.monitor.stop(wait=True)
