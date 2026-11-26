@@ -7,6 +7,7 @@ import threading
 import time
 import tkinter as tk
 import tkinter.font as tkfont
+import weakref
 import webbrowser
 from tkinter import filedialog, messagebox
 
@@ -42,13 +43,17 @@ from ..ui.rounded import (
     RoundList,
     RoundScrollbar,
     RoundSlider,
+    SegmentedControl,
+    Switch,
     photo,
     round_box,
     round_corners,
 )
+from ..ui.titlebar import color_title_bar
 from ..ui.tray import TrayMenu, create_tray_icon, make_tray_icon, round_window_corners
 from ..ui.widgets import MarqueeLabel
 from ..updates import RELEASES_URL, UpdateChecker, current_version
+from ..winaudio import get_playing_apps
 
 
 def snap_to_step(value, step, lowest=0):
@@ -60,7 +65,8 @@ def snap_to_step(value, step, lowest=0):
 
 
 class App:
-    WINDOW_W, WINDOW_H = 520, 760
+    WINDOW_W, WINDOW_H = 520, 760   # height: re-measured at startup (_measure_height)
+    BOTTOM_MARGIN = 14             # space under the last card
     VOLUME_STEP = 5                # the volume slider moves 5, 10, 15 … 100
     VOLUME_LOWEST = 5              # muting makes no sense for the ambient sound
     DUCK_STEP = 10                 # the duck slider: 0 (stop), 10 … 90, 100 (keep playing)
@@ -119,6 +125,12 @@ class App:
             enabled=lambda: self.config.get("check_updates", True) is not False)
 
         self._build_ui()
+        # One height for every tab (they are laid out to need about the same),
+        # so switching tabs never resizes the window. Measured with the real
+        # fonts, so it fits whatever Windows draws.
+        self.WINDOW_H = self._measure_height()
+        self.root.geometry(f"{self.WINDOW_W}x{self.WINDOW_H}")
+        color_title_bar(self.root)
         self.root.after(self.UI_POLL_MS, self._drain_ui_queue)
         threading.Thread(target=self._build_tray, daemon=True, name="Tray").start()
         self.root.after(0, self._refresh_now_playing)
@@ -270,9 +282,32 @@ class App:
     def _fit_window(self):
         """Grow the (fixed-size) window so shown bars don't cover the settings."""
         self.root.update_idletasks()
-        extra = sum(bar.winfo_reqheight() for bar in (self.update_row, self.suggest_row)
-                    if self._bar_shown(bar))
+        extra = sum(bar.winfo_reqheight() + self.BAR_GAP
+                    for bar in (self.update_row, self.suggest_row) if self._bar_shown(bar))
         self.root.geometry(f"{self.WINDOW_W}x{self.WINDOW_H + extra}")
+
+    BAR_GAP = 8                    # the bars' top padding (pady=(8, 0))
+
+    def _measure_height(self):
+        """Height that fits the tallest tab, with room for a two-line status
+        message (long messages wrap) and a margin under the last card."""
+        self.root.update_idletasks()
+        tabs = (self.tab_main, self.tab_exclude, self.tab_advanced)
+        shown = next((t for t in tabs if t.winfo_manager() == "pack"), self.tab_main)
+        status = self.status_var.get()
+        self.status_var.set("Measuring\nthe status line")
+        needed = 0
+        for tab in tabs:
+            for t in tabs:
+                t.pack_forget()
+            tab.pack(fill="both", expand=True)
+            self.root.update_idletasks()
+            needed = max(needed, self.root.winfo_reqheight())
+        for t in tabs:
+            t.pack_forget()
+        shown.pack(fill="both", expand=True)
+        self.status_var.set(status)
+        return needed + self.BOTTOM_MARGIN
 
     # ── update notice ──
 
@@ -347,9 +382,7 @@ class App:
 
     def _refresh_update_status(self):
         on = self.config.get("check_updates", True) is not False
-        self.update_toggle.config(bg=self._GOOD if on else theme.CONTROL,
-                                  fg=theme.ON_ACCENT if on else theme.SUBTLE,
-                                  text="Enabled" if on else "Disabled")
+        self.update_switch.set(on)
         u = self.updater
         if self._update_info is not None:
             text, color = f"● v{self._update_info.version} is available", self._GOOD
@@ -469,12 +502,14 @@ class App:
         self.root.deiconify()
         self.root.lift()
         self.root.focus_force()
+        self._on_tab_changed(self.tabs.get())
 
     def _on_window_close(self):
         """The X button hides to tray. Nothing is saved (see _save_settings)."""
         if self._commit_inputs():
             self._revert_invalid_fields()   # invalid typed values never applied
         self.root.withdraw()
+        self._stop_playing_now()
 
     def _quit(self):
         if self._quitting:
@@ -483,6 +518,7 @@ class App:
         log.info("Quit requested")
         self.monitoring = False
         self.root.withdraw()
+        self._stop_playing_now()
 
         self.updater.stop()
         if self._tray_menu is not None:
@@ -543,7 +579,7 @@ class App:
                              bg=BTN_BG, fg=color, relief="flat",
                              font=("Segoe UI", 10, "bold"),
                              padx=8, pady=5, cursor="hand2",
-                             activebackground=theme.PRESSED, activeforeground=color)
+                             activeforeground=color)
 
         self.title_label = label(self.root, "Silence Player", size=16, bold=True,
                                  color=theme.BRAND)       # the icon's purple
@@ -561,39 +597,18 @@ class App:
             self.tab_main.pack_forget()
             self.tab_exclude.pack_forget()
             self.tab_advanced.pack_forget()
-            self.tab_btn_main.config(bg=BTN_BG, fg=DIM)
-            self.tab_btn_exclude.config(bg=BTN_BG, fg=DIM)
-            self.tab_btn_advanced.config(bg=BTN_BG, fg=DIM)
-            if tab == "main":
-                self.tab_main.pack(fill="both", expand=True)
-                self.tab_btn_main.config(bg=ACC, fg=theme.ON_ACCENT)
-            elif tab == "exclude":
-                self.tab_exclude.pack(fill="both", expand=True)
-                self.tab_btn_exclude.config(bg=ACC, fg=theme.ON_ACCENT)
-            else:
-                self.tab_advanced.pack(fill="both", expand=True)
-                self.tab_btn_advanced.config(bg=ACC, fg=theme.ON_ACCENT)
+            {"main": self.tab_main, "exclude": self.tab_exclude,
+             "advanced": self.tab_advanced}[tab].pack(fill="both", expand=True)
+            self.tabs.set(tab)
+            self._on_tab_changed(tab)
 
-        self.tab_btn_main = RoundButton(tab_bar, text="Player",
-                                      command=lambda: switch_tab("main"),
-                                      relief="flat", font=("Segoe UI", 10, "bold"),
-                                      padx=16, pady=5, cursor="hand2",
-                                      bg=ACC, fg=theme.ON_ACCENT)
-        self.tab_btn_main.pack(side="left", padx=3)
-
-        self.tab_btn_exclude = RoundButton(tab_bar, text="Exclude Apps",
-                                         command=lambda: switch_tab("exclude"),
-                                         relief="flat", font=("Segoe UI", 10, "bold"),
-                                         padx=16, pady=5, cursor="hand2",
-                                         bg=BTN_BG, fg=DIM)
-        self.tab_btn_exclude.pack(side="left", padx=3)
-
-        self.tab_btn_advanced = RoundButton(tab_bar, text="Advanced",
-                                          command=lambda: switch_tab("advanced"),
-                                          relief="flat", font=("Segoe UI", 10, "bold"),
-                                          padx=16, pady=5, cursor="hand2",
-                                          bg=BTN_BG, fg=DIM)
-        self.tab_btn_advanced.pack(side="left", padx=3)
+        self._switch_tab = switch_tab
+        # One pill for the three tabs; the selected one is highlighted inside it.
+        self.tabs = SegmentedControl(tab_bar, [("Player", "main", ACC),
+                                               ("Exclude Apps", "exclude", ACC),
+                                               ("Advanced", "advanced", ACC)],
+                                     "main", command=switch_tab, track=theme.CARD)
+        self.tabs.pack()
 
         self._build_main_tab(self.tab_main, BG, CARD, FG, ACC, BTN_BG, DIM, label, entry, button)
         self._build_exclude_tab(self.tab_exclude, BG, CARD, FG, ACC, BTN_BG, DIM)
@@ -668,32 +683,23 @@ class App:
 
         self.mode_var = tk.StringVar(value=self.config.get("mode", "single"))
 
-        def mode_btn(text, val):
-            def on_click():
-                if self.monitoring:          # (the other mode is greyed out anyway)
-                    return
-                self.mode_var.set(val)
-                self.config["mode"] = val
-                _refresh_mode()
-            b = RoundButton(mode_frame, text=text, command=on_click,
-                          relief="flat", font=("Segoe UI", 10, "bold"),
-                          padx=12, pady=5, cursor="hand2", disabledforeground=theme.DISABLED)
-            b.pack(side="left", padx=3)
-            # A disabled button ignores its command but still sees the click.
-            b.bind("<Button-1>", lambda e: self._mode_locked_hint(val), add="+")
-            return b
+        def on_mode(val):
+            self.mode_var.set(val)
+            self.config["mode"] = val
+            _refresh_mode()
 
-        self.btn_single   = mode_btn("Single File", "single")
-        self.btn_playlist = mode_btn("Playlist",    "playlist")
+        self.mode_pill = SegmentedControl(mode_frame, [("Single File", "single", ACC),
+                                                       ("Playlist", "playlist", ACC)],
+                                          self.mode_var.get(), command=on_mode,
+                                          track=theme.CARD, on_locked=self._mode_locked_hint)
+        self.mode_pill.pack(side="left")
 
         def style_mode_buttons():
-            """Selected mode highlighted; while monitoring the other one is greyed out."""
-            m, locked = self.mode_var.get(), self.monitoring
-            for b, val in ((self.btn_single, "single"), (self.btn_playlist, "playlist")):
-                selected = m == val
-                b.config(bg=ACC if selected else BTN_BG, fg=theme.ON_ACCENT if selected else DIM,
-                         state="disabled" if locked and not selected else "normal",
-                         cursor="arrow" if locked else "hand2")
+            """While monitoring, the mode that isn't selected is greyed out."""
+            m = self.mode_var.get()
+            self.mode_pill.set(m)
+            self.mode_pill.set_disabled(
+                {"single", "playlist"} - {m} if self.monitoring else set())
 
         self._style_mode_buttons = style_mode_buttons
 
@@ -711,47 +717,30 @@ class App:
         label(single_card, "Ambient Sound File", bold=True).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
         self.mp3_var = tk.StringVar()
-        self.mp3_entry = self._path_field(single_card, self.mp3_var, self._browse_mp3, BTN_BG, FG)
-        self.mp3_entry.grid(row=1, column=0, sticky="w")
-        button(single_card, "Browse", self._browse_mp3).grid(row=1, column=1, padx=(6, 10))
+        single_browse = button(single_card, "Browse", self._browse_mp3)
+        single_browse.grid(row=1, column=1, padx=(6, 10))
 
         self.single_loop_var = tk.StringVar(value=self.config.get("single_loop_mode", "loop"))
-        single_toggle_frame = tk.Frame(single_card, bg=CARD)
-        single_toggle_frame.grid(row=1, column=2, sticky="w")
 
-        def make_single_toggle(text, val):
-            def on_click():
-                self.single_loop_var.set(val)
-                self.config["single_loop_mode"] = val
-                _refresh_single_toggle()
-            b = RoundButton(single_toggle_frame, text=text, command=on_click,
-                          relief="flat", font=("Segoe UI", 9, "bold"),
-                          padx=8, pady=4, cursor="hand2")
-            b.pack(side="left", padx=2)
-            return b
+        def on_single_loop(val):
+            self.single_loop_var.set(val)
+            self.config["single_loop_mode"] = val
 
-        self.s_btn_loop = make_single_toggle("Loop", "loop")
-        self.s_btn_stop = make_single_toggle("Stop", "stop")
-
-        def _refresh_single_toggle():
-            v = self.single_loop_var.get()
-            self.s_btn_loop.config(bg=ACC if v == "loop" else BTN_BG,
-                                   fg=theme.ON_ACCENT if v == "loop" else DIM)
-            self.s_btn_stop.config(bg=theme.ERROR if v == "stop" else BTN_BG,
-                                   fg=theme.ON_ACCENT if v == "stop" else DIM)
-
-        _refresh_single_toggle()
+        self.single_loop_pill = SegmentedControl(
+            single_card, [("Loop", "loop", ACC), ("Stop", "stop", theme.ERROR)],
+            self.single_loop_var.get(), command=on_single_loop, track=BTN_BG,
+            font=("Segoe UI", 9, "bold"), pad_x=10, height=30, equal=False)
+        self.single_loop_pill.grid(row=1, column=2, sticky="w")
+        self.mp3_entry = self._path_field(
+            single_card, self.mp3_var, self._browse_mp3, BTN_BG, FG,
+            width_chars=self._name_field_chars(single_browse, self.single_loop_pill, 22))
+        self.mp3_entry.grid(row=1, column=0, sticky="w")
 
         playlist_card = tk.Frame(parent, bg=CARD, padx=16, pady=12)
         round_corners(playlist_card)
         label(playlist_card, "Ambient Sound Playlist (Folder)", bold=True).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
         self.playlist_var = tk.StringVar()
-        # Narrower than the file field: this row also holds three loop buttons.
-        self.playlist_entry = self._path_field(playlist_card, self.playlist_var,
-                                               self._browse_playlist, BTN_BG, FG,
-                                               width_chars=15)
-        self.playlist_entry.grid(row=1, column=0, sticky="w")
         self.playlist_browse_btn = button(playlist_card, "Browse", self._browse_playlist)
         self.playlist_browse_btn.config(disabledforeground=theme.DISABLED)
         self.playlist_browse_btn.grid(row=1, column=1, padx=(6, 10))
@@ -760,34 +749,23 @@ class App:
         self.playlist_browse_btn.bind("<Button-1>", self._playlist_locked_hint, add="+")
 
         self.playlist_loop_var = tk.StringVar(value=self.config.get("playlist_loop_mode", "loop_playlist"))
-        playlist_toggle_frame = tk.Frame(playlist_card, bg=CARD)
-        playlist_toggle_frame.grid(row=1, column=2, sticky="w")
 
-        def make_playlist_toggle(text, val):
-            def on_click():
-                self.playlist_loop_var.set(val)
-                self.config["playlist_loop_mode"] = val
-                _refresh_playlist_toggle()
-            b = RoundButton(playlist_toggle_frame, text=text, command=on_click,
-                          relief="flat", font=("Segoe UI", 9, "bold"),
-                          padx=8, pady=4, cursor="hand2")
-            b.pack(side="left", padx=2)
-            return b
+        def on_playlist_loop(val):
+            self.playlist_loop_var.set(val)
+            self.config["playlist_loop_mode"] = val
 
-        self.p_btn_loop_song = make_playlist_toggle("Loop Song",     "loop_song")
-        self.p_btn_stop      = make_playlist_toggle("Stop",          "stop")
-        self.p_btn_loop_pl   = make_playlist_toggle("Loop Playlist", "loop_playlist")
-
-        def _refresh_playlist_toggle():
-            v = self.playlist_loop_var.get()
-            self.p_btn_loop_song.config(bg=ACC if v == "loop_song" else BTN_BG,
-                                        fg=theme.ON_ACCENT if v == "loop_song" else DIM)
-            self.p_btn_stop.config(bg=theme.ERROR if v == "stop" else BTN_BG,
-                                   fg=theme.ON_ACCENT if v == "stop" else DIM)
-            self.p_btn_loop_pl.config(bg=theme.SUCCESS if v == "loop_playlist" else BTN_BG,
-                                      fg=theme.ON_ACCENT if v == "loop_playlist" else DIM)
-
-        _refresh_playlist_toggle()
+        self.playlist_loop_pill = SegmentedControl(
+            playlist_card, [("Loop Song", "loop_song", ACC), ("Stop", "stop", theme.ERROR),
+                            ("Loop Playlist", "loop_playlist", theme.SUCCESS)],
+            self.playlist_loop_var.get(), command=on_playlist_loop, track=BTN_BG,
+            font=("Segoe UI", 9, "bold"), pad_x=10, height=30, equal=False)
+        self.playlist_loop_pill.grid(row=1, column=2, sticky="w")
+        # This row also holds three loop modes, so the name gets what's left.
+        self.playlist_entry = self._path_field(
+            playlist_card, self.playlist_var, self._browse_playlist, BTN_BG, FG,
+            width_chars=self._name_field_chars(self.playlist_browse_btn,
+                                               self.playlist_loop_pill, 22))
+        self.playlist_entry.grid(row=1, column=0, sticky="w")
 
         shared_card = tk.Frame(parent, bg=CARD, padx=16, pady=12)
         round_corners(shared_card)
@@ -814,22 +792,12 @@ class App:
 
         self.fade_enabled_var = tk.BooleanVar(value=self.config.get("fade_enabled", True))
 
-        def toggle_fade():
-            v = self.fade_enabled_var.get()
-            self.config["fade_enabled"] = v
-            self.fade_btn.config(
-                bg=theme.SUCCESS if v else BTN_BG,
-                fg=theme.ON_ACCENT if v else DIM,
-                text="Enabled" if v else "Disabled")
+        def toggle_fade(on):
+            self.fade_enabled_var.set(on)
+            self.config["fade_enabled"] = on
 
-        self.fade_btn = RoundButton(fade_row,
-                                  command=lambda: [
-                                      self.fade_enabled_var.set(not self.fade_enabled_var.get()),
-                                      toggle_fade()],
-                                  relief="flat", font=("Segoe UI", 9, "bold"), width=8,
-                                  padx=8, pady=4, cursor="hand2")
-        self.fade_btn.pack(side="left")
-        toggle_fade()
+        self.fade_switch = Switch(fade_row, value=self.fade_enabled_var.get(), command=toggle_fade)
+        self.fade_switch.pack(side="left")
 
         duck_card = tk.Frame(parent, bg=CARD, padx=16, pady=12)
         round_corners(duck_card)
@@ -1063,24 +1031,22 @@ class App:
 
     # ── Start with Windows (applied when Save Settings is clicked) ──
 
-    def _toggle_startup_choice(self):
+    def _toggle_startup_choice(self, on=None):
         if not self._startup.available:
             return
-        self.startup_var.set(not self.startup_var.get())
+        self.startup_var.set(not self.startup_var.get() if on is None else bool(on))
         self._refresh_startup_ui()
 
     def _refresh_startup_ui(self):
         status = self._startup.status()
         on = bool(self.startup_var.get())
         if status == "unavailable":
-            self.startup_btn.config(text="Windows only", state="disabled", bg=theme.CONTROL,
-                                    fg=theme.DISABLED, cursor="arrow")
-            self.startup_hint.config(text="")
+            self.startup_switch.set(False)
+            self.startup_switch.config(state="disabled")
+            self.startup_hint.config(text="Only available on Windows.")
             return
-        self.startup_btn.config(state="normal", cursor="hand2",
-                                bg=theme.SUCCESS if on else theme.CONTROL,
-                                fg=theme.ON_ACCENT if on else theme.SUBTLE,
-                                text="Enabled" if on else "Disabled")
+        self.startup_switch.config(state="normal")
+        self.startup_switch.set(on)
         if status == "blocked" and not on:
             hint = "Turned off in Windows Settings (Startup apps). Enable it here to undo."
         else:
@@ -1103,6 +1069,17 @@ class App:
             return "Settings saved, but Start with Windows could not be changed. See the log file."
         self._refresh_startup_ui()
         return None
+
+    def _name_field_chars(self, *row_widgets_and_max):
+        """Width (in characters) for a file/folder name field sharing a card row
+        with these widgets, so the row always fits the card (measured with the
+        fonts actually in use). The last argument is the widest it may be."""
+        *widgets, most = row_widgets_and_max
+        inner = self.WINDOW_W - 2 * 24 - 2 * 16          # card padding on both sides
+        gaps = 6 + 10                                     # around the Browse button
+        room = inner - gaps - sum(w.winfo_reqwidth() for w in widgets)
+        zero = int(self.root.tk.call("font", "measure", ("Segoe UI", 10), "0"))
+        return max(8, min(most, (room - 16) // max(1, zero)))
 
     def _path_field(self, parent, var, on_click, bg, fg, width_chars=22):
         """File/folder name (scrolls if too long); click to choose, hover for the full path."""
@@ -1180,18 +1157,24 @@ class App:
                              relief="flat", font=("Segoe UI", 10), bd=0, width=22)
         add_entry.pack(fill="x", expand=True)
 
-        tk.Label(add_frame, text="e.g. discord.exe", bg=CARD, fg=DIM,
+        tk.Label(add_frame, text="or type a name", bg=CARD, fg=DIM,
                  font=("Segoe UI", 8)).pack(side="left", padx=(6, 0))
 
+        # "Playing now": one click excludes an app that is making sound right now.
+        self._playing_source = get_playing_apps
+        self._playing_thread = self._playing_stop = None
+        self._playing_seen, self._playing_shown = {}, None
+        playing_row = tk.Frame(card, bg=CARD)
+        playing_row.pack(fill="x", pady=(8, 0), before=add_frame)
+        tk.Label(playing_row, text="Playing now:", bg=CARD, fg=DIM,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 6))
+        self.playing_chips = tk.Frame(playing_row, bg=CARD)
+        self.playing_chips.pack(side="left", fill="x", expand=True)
+        self._update_playing_now([])
+
         def add_app():
-            name = normalize_app_name(self.exclude_entry_var.get())
-            if not name:
-                return
-            if name in list(self.exclude_listbox.get(0, tk.END)):
-                return
-            self.exclude_listbox.insert(tk.END, name)
-            self.exclude_entry_var.set("")
-            self._sync_excluded_apps()
+            if self._exclude_app(self.exclude_entry_var.get()):
+                self.exclude_entry_var.set("")
 
         def remove_app():
             selected = self.exclude_listbox.curselection()
@@ -1213,16 +1196,99 @@ class App:
 
         add_entry.bind("<Return>", lambda e: add_app())
 
+    # ── Exclude Apps: "Playing now" ──
+
+    PLAYING_POLL_SECONDS = 1.0
+    PLAYING_KEEP_SECONDS = 6.0     # keep an app listed this long after it goes quiet
+    CHIP_FONT = ("Segoe UI", 9, "bold")
+
+    def _exclude_app(self, name):
+        """Add an app to Exclude Apps (typed or clicked). False if nothing to add."""
+        name = normalize_app_name(name)
+        if not name or name in self.exclude_listbox.get(0, tk.END):
+            return False
+        self.exclude_listbox.insert(tk.END, name)
+        self._sync_excluded_apps()
+        self._playing_shown = None
+        self._update_playing_now([])          # its chip goes away at once
+        return True
+
+    def _on_tab_changed(self, tab):
+        if tab == "exclude" and self.root.state() != "withdrawn":
+            self._start_playing_now()
+        else:
+            self._stop_playing_now()
+
+    def _start_playing_now(self):
+        if self._playing_thread is not None and self._playing_thread.is_alive():
+            return
+        stop = self._playing_stop = threading.Event()
+        # The thread holds no reference to the window: if it ever held the
+        # last one, Python would tear the Tk objects down on this thread and
+        # Tcl aborts the whole process. It only gets the audio source, the UI
+        # queue and a weak reference. Excluded apps are filtered on the UI side.
+        source, ui_queue, poll = self._playing_source, self._ui_queue, self.PLAYING_POLL_SECONDS
+        app_ref = weakref.ref(self)
+
+        def deliver(names):                    # runs on the Tk thread
+            app = app_ref()
+            if app is not None:
+                app._update_playing_now(names)
+
+        def run():
+            while not stop.is_set():
+                try:
+                    names = sorted(source([]))
+                except Exception:
+                    log_throttled("playing_now", logging.DEBUG,
+                                  "Could not list the apps playing sound", exc_info=True)
+                    names = []
+                if not stop.is_set():
+                    ui_queue.put((deliver, (names,)))
+                stop.wait(poll)
+
+        self._playing_thread = threading.Thread(target=run, daemon=True, name="PlayingNow")
+        self._playing_thread.start()
+
+    def _stop_playing_now(self):
+        if getattr(self, "_playing_stop", None) is not None:
+            self._playing_stop.set()
+        self._playing_thread = None
+
+    def _update_playing_now(self, names):
+        now = time.monotonic()
+        for name in names:
+            self._playing_seen[name] = now
+        excluded = {e.lower() for e in self.config.get("excluded_apps", [])}
+        self._playing_seen = {n: t for n, t in self._playing_seen.items()
+                              if now - t <= self.PLAYING_KEEP_SECONDS}
+        current = sorted(n for n in self._playing_seen if n.lower() not in excluded)
+        if current == self._playing_shown:
+            return
+        self._playing_shown = current
+        for child in self.playing_chips.winfo_children():
+            child.destroy()
+        if not current:
+            tk.Label(self.playing_chips, text="nothing right now", bg=theme.CARD,
+                     fg=theme.SUBTLE, font=("Segoe UI", 9)).pack(side="left")
+            return
+        # As many chips as fit on the row (the rest show up once those are added).
+        room = self.WINDOW_W - 2 * 24 - 2 * 16 - 100
+        for name in current:
+            text = "+  " + name
+            width = int(self.root.tk.call("font", "measure", self.CHIP_FONT, text)) + 22 + 6
+            if width > room:
+                break
+            room -= width
+            RoundButton(self.playing_chips, text=text, command=lambda n=name: self._exclude_app(n),
+                        bg=theme.CONTROL, fg=theme.TEXT, font=self.CHIP_FONT,
+                        padx=8, pady=2).pack(side="left", padx=(0, 6))
+
     def _build_advanced_tab(self, parent, BG, CARD, FG, ACC, BTN_BG, DIM):
         self._DIM, self._GOOD = DIM, theme.SUCCESS
-        tk.Label(parent, text="Advanced Settings", bg=BG, fg=ACC,
-                 font=("Segoe UI", 12, "bold")).pack(pady=(12, 2))
-        tk.Label(parent, text="Fixes for apps that confuse silence detection.",
-                 bg=BG, fg=DIM, font=("Segoe UI", 9)).pack(pady=(0, 8))
-
         card = tk.Frame(parent, bg=CARD, padx=16, pady=12)
         round_corners(card)
-        card.pack(fill="x", padx=24, pady=4)
+        card.pack(fill="x", padx=24, pady=(10, 4))
 
         title_row = tk.Frame(card, bg=CARD)
         title_row.pack(fill="x")
@@ -1232,16 +1298,15 @@ class App:
         self.mirror_fix_var = tk.BooleanVar(value=self.config.get("mirror_fix_enabled", True))
         self.mirror_status = tk.Label(card, bg=CARD, font=("Segoe UI", 9, "bold"))
 
-        def toggle_mirror_fix():
-            self.mirror_fix_var.set(not self.mirror_fix_var.get())
-            self.config["mirror_fix_enabled"] = bool(self.mirror_fix_var.get())
+        def toggle_mirror_fix(on):
+            self.mirror_fix_var.set(on)
+            self.config["mirror_fix_enabled"] = bool(on)
             self._apply_mirror_state()
             self._refresh_mirror_ui()
 
-        self.mirror_btn = RoundButton(title_row, command=toggle_mirror_fix,
-                                    relief="flat", font=("Segoe UI", 9, "bold"),
-                                    padx=12, pady=4, cursor="hand2")
-        self.mirror_btn.pack(side="right")
+        self.mirror_switch = Switch(title_row, value=self.mirror_fix_var.get(),
+                                    command=toggle_mirror_fix)
+        self.mirror_switch.pack(side="right")
 
         tk.Label(card,
                  text="Some apps listen to your PC's sound and show a fake level in\n"
@@ -1259,7 +1324,7 @@ class App:
         self.mirror_listbox = RoundList(
             list_frame, yscrollcommand=scrollbar.set, fg=FG,
             selectbackground=ACC, selectforeground=theme.ON_ACCENT,
-            font=("Segoe UI", 10), height=5)
+            font=("Segoe UI", 10), height=4)
         self.mirror_listbox.pack(fill="x", expand=True)
         scrollbar.config(command=self.mirror_listbox.yview)
 
@@ -1322,57 +1387,50 @@ class App:
         self._refresh_mirror_ui()
         self._apply_mirror_state()
 
-        # Update check
-        update_card = tk.Frame(parent, bg=CARD, padx=16, pady=10)
-        round_corners(update_card)
-        update_card.pack(fill="x", padx=24, pady=4)
-        top = tk.Frame(update_card, bg=CARD)
+        # One card for the app itself: update check, then Start with Windows.
+        app_card = tk.Frame(parent, bg=CARD, padx=16, pady=12)
+        round_corners(app_card)
+        app_card.pack(fill="x", padx=24, pady=4)
+        top = tk.Frame(app_card, bg=CARD)
         top.pack(fill="x")
         tk.Label(top, text="Check for updates", bg=CARD, fg=FG,
                  font=("Segoe UI", 10, "bold")).pack(side="left")
 
-        def toggle_updates():
-            on = not (self.config.get("check_updates", True) is not False)
-            self.config["check_updates"] = on
+        def toggle_updates(on):
+            self.config["check_updates"] = bool(on)
             if on and self.updater.last_checked is None:
                 self.updater.check_now()
             self._refresh_update_status()
 
-        self.update_toggle = RoundButton(top, command=toggle_updates, relief="flat",
-                                       font=("Segoe UI", 9, "bold"), padx=12, pady=4,
-                                       cursor="hand2")
-        self.update_toggle.pack(side="right")
+        self.update_switch = Switch(top, value=self.config.get("check_updates", True) is not False,
+                                    command=toggle_updates)
+        self.update_switch.pack(side="right")
         RoundButton(top, text="Check now", command=self._check_updates_now, bg=BTN_BG, fg=ACC,
-                  relief="flat", font=("Segoe UI", 9, "bold"), padx=10, pady=4,
-                  cursor="hand2").pack(side="right", padx=(0, 6))
-        self.update_status = tk.Label(update_card, bg=CARD, fg=DIM, font=("Segoe UI", 9),
+                    font=("Segoe UI", 9, "bold"), padx=10, pady=3).pack(side="right", padx=(0, 10))
+        self.update_status = tk.Label(app_card, bg=CARD, fg=DIM, font=("Segoe UI", 9),
                                       anchor="w")
-        self.update_status.pack(anchor="w", fill="x", pady=(6, 0))
+        self.update_status.pack(anchor="w", fill="x", pady=(4, 0))
         self._refresh_update_status()
 
+        tk.Frame(app_card, bg=BTN_BG, height=1).pack(fill="x", pady=10)
+
         # Start with Windows (applied with Save Settings, like the other settings)
-        startup_card = tk.Frame(parent, bg=CARD, padx=16, pady=10)
-        round_corners(startup_card)
-        startup_card.pack(fill="x", padx=24, pady=4)
-        startup_top = tk.Frame(startup_card, bg=CARD)
+        startup_top = tk.Frame(app_card, bg=CARD)
         startup_top.pack(fill="x")
         tk.Label(startup_top, text="Start with Windows", bg=CARD, fg=FG,
                  font=("Segoe UI", 10, "bold")).pack(side="left")
         self.startup_var = tk.BooleanVar(value=self._startup.is_enabled())
-        self.startup_btn = RoundButton(startup_top, command=self._toggle_startup_choice,
-                                     relief="flat", font=("Segoe UI", 9, "bold"),
-                                     padx=12, pady=4, cursor="hand2")
-        self.startup_btn.pack(side="right")
-        self.startup_hint = tk.Label(startup_card, bg=CARD, fg=DIM, font=("Segoe UI", 9),
+        self.startup_switch = Switch(startup_top, value=self.startup_var.get(),
+                                     command=self._toggle_startup_choice)
+        self.startup_switch.pack(side="right")
+        self.startup_hint = tk.Label(app_card, bg=CARD, fg=DIM, font=("Segoe UI", 9),
                                      anchor="w", justify="left", wraplength=420)
-        self.startup_hint.pack(anchor="w", fill="x", pady=(6, 0))
+        self.startup_hint.pack(anchor="w", fill="x", pady=(4, 0))
         self._refresh_startup_ui()
 
     def _refresh_mirror_ui(self, select=None):
         on = bool(self.mirror_fix_var.get())
-        self.mirror_btn.config(bg=self._GOOD if on else theme.CONTROL,
-                               fg=theme.ON_ACCENT if on else self._DIM,
-                               text="Enabled" if on else "Disabled")
+        self.mirror_switch.set(on)
         apps = _coerce_mirror_apps(self.config.get("mirror_apps", []))
         self.mirror_listbox.delete(0, tk.END)
         for i, a in enumerate(apps):

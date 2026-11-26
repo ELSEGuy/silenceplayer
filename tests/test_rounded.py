@@ -272,3 +272,92 @@ def test_round_scrollbar_drives_its_list(root):
     assert commands[-1][0] == "moveto" and commands[-1][1] > 0
     bar.config(command=None)
     assert bar._command is None
+
+
+# ── switches, segmented pills, hover ─────────────────────────────────────────
+
+from silenceplayer.ui import theme  # noqa: E402
+from silenceplayer.ui.rounded import SegmentedControl, Switch, hover_colour  # noqa: E402
+
+
+def test_switch_flips_and_reports(root):
+    holder = tk.Frame(root, bg=theme.CARD)
+    holder.pack()
+    seen = []
+    sw = Switch(holder, value=False, command=seen.append)
+    sw.pack()
+    pump(root, 0.05)
+    assert sw.get() is False
+    sw.event_generate("<ButtonPress-1>", x=10, y=10)
+    sw.event_generate("<ButtonRelease-1>", x=10, y=10)
+    assert sw.get() is True and seen == [True]
+    pump(root, 0.3)                          # the knob slide finishes
+    assert sw._pos == 1.0
+    sw.set(False)                            # set() doesn't report
+    assert sw.get() is False and seen == [True] and sw._pos == 0.0
+    sw.config(state="disabled")
+    sw.invoke()
+    assert sw.get() is False and sw.cget("state") == "disabled"
+    sw.config(state="normal")
+    assert sw.invoke() is None and sw.get() is True and seen == [True, True]
+
+
+def test_segmented_selects_reports_and_locks(root):
+    holder = tk.Frame(root, bg=theme.BG)
+    holder.pack()
+    chosen, locked = [], []
+    pill = SegmentedControl(holder, [("Single File", "single", theme.BLUE),
+                                     ("Playlist", "playlist", theme.BLUE)], "single",
+                            command=chosen.append, on_locked=locked.append)
+    pill.pack()
+    pump(root, 0.05)
+    x, y = pill.center_of("playlist")
+    pill.event_generate("<ButtonPress-1>", x=x, y=y)
+    pill.event_generate("<ButtonRelease-1>", x=x, y=y)
+    assert pill.get() == "playlist" and chosen == ["playlist"]
+    pill.invoke("playlist")                  # already selected: nothing
+    assert chosen == ["playlist"]
+    pill.set("single")                       # set() doesn't report
+    assert chosen == ["playlist"]
+    pill.set_disabled({"playlist"})
+    assert pill.state_of("playlist") == "disabled" and pill.state_of("single") == "normal"
+    pill.event_generate("<ButtonPress-1>", x=x, y=y)
+    pill.event_generate("<ButtonRelease-1>", x=x, y=y)
+    assert pill.get() == "single" and locked == ["playlist"]
+    pill.invoke("playlist")
+    assert locked == ["playlist", "playlist"] and pill.get() == "single"
+    assert pill.label_of("playlist") == "Playlist"
+    # a release on another option than the press doesn't select anything
+    pill.set_disabled(set())
+    sx, sy = pill.center_of("single")
+    pill.event_generate("<ButtonPress-1>", x=x, y=y)
+    pill.event_generate("<ButtonRelease-1>", x=sx, y=sy)
+    assert pill.get() == "single"
+
+
+def test_equal_and_natural_segment_widths(root):
+    holder = tk.Frame(root, bg=theme.CARD)
+    holder.pack()
+    opts = [("Loop Song", "a", theme.BLUE), ("Stop", "b", theme.RED)]
+    equal = SegmentedControl(holder, opts, "a", equal=True)
+    natural = SegmentedControl(holder, opts, "a", equal=False)
+    assert equal._widths[0] == equal._widths[1]
+    assert natural._widths[0] > natural._widths[1]
+
+
+def test_buttons_light_up_on_hover(root):
+    holder = tk.Frame(root, bg=theme.CARD)
+    holder.pack()
+    b = RoundButton(holder, text="Browse", command=lambda: None, bg=theme.CONTROL)
+    b.pack()
+    pump(root, 0.05)
+    rest = b.cget("image")
+    b.event_generate("<Enter>")
+    hovered = b.cget("image")
+    assert hovered != rest
+    b.event_generate("<Leave>")
+    assert b.cget("image") == rest
+    b.config(state="disabled")
+    b.event_generate("<Enter>")
+    assert b.cget("image") == rest, "no hover on a disabled button"
+    assert hover_colour(theme.SURFACE1) != theme.SURFACE1

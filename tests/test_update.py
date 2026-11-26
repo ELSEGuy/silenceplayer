@@ -237,9 +237,9 @@ def test_manual_check_results_are_shown_in_the_status(appmod, root, ui):
 
 def test_switch_is_a_normal_setting(appmod, root, ui, cfg_path):
     a, opened = ui
-    assert a.update_toggle.cget("text") == "Enabled"
-    a.update_toggle.invoke()
-    assert a.config["check_updates"] is False and a.update_toggle.cget("text") == "Disabled"
+    assert a.update_switch.get()
+    a.update_switch.invoke()
+    assert a.config["check_updates"] is False and not a.update_switch.get()
     assert "won't check" in a.update_status.cget("text")
     assert not cfg_path.exists()
     a._save_settings()

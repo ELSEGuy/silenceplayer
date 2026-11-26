@@ -177,8 +177,9 @@ like `v1.4.0` into a **draft** release with the files attached. See
 | `instance.py` | Only one Silence Player at a time |
 | `ui/window.py` | The Settings window and its tabs |
 | `ui/tray.py`, `ui/widgets.py` | The tray icon and menu, the scrolling name label |
-| `ui/rounded.py` | Apple-style continuous corners: rounded cards, buttons, fields, lists and sliders |
+| `ui/rounded.py` | Apple-style continuous corners: rounded cards, buttons, switches, segmented pills, fields, lists and sliders |
 | `ui/theme.py` | The colours: Catppuccin Frappé palette and the role of each colour |
+| `ui/titlebar.py` | The window's title bar in the theme's colours (Windows) |
 
 ## 🧩 Built with
 

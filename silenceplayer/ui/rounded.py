@@ -190,9 +190,23 @@ def _text_size(widget, font, text):
                                                                     "-linespace"))
 
 
-def _lighter(colour, amount=0.12):
-    r, g, b = ImageColor.getrgb(colour)[:3]
-    return "#%02x%02x%02x" % tuple(int(v + (255 - v) * amount) for v in (r, g, b))
+def mix(colour, toward, amount):
+    """Blend `colour` toward `toward` by `amount` (0-1)."""
+    a = ImageColor.getrgb(colour)[:3]
+    b = ImageColor.getrgb(toward)[:3]
+    return "#%02x%02x%02x" % tuple(round(x + (y - x) * amount) for x, y in zip(a, b, strict=True))
+
+
+HOVER = 0.12       # how much lighter a control gets under the mouse...
+PRESS = 0.25       # ...and while it's held down
+
+
+def hover_colour(colour):
+    return mix(colour, theme.TEXT, HOVER)
+
+
+def press_colour(colour):
+    return mix(colour, theme.TEXT, PRESS)
 
 
 class RoundButton(tk.Label):
@@ -235,6 +249,7 @@ class RoundButton(tk.Label):
         # border: room around the text besides padx/pady (tk.Button's own is ~3px)
         self._extra = (self.EXTRA_X, self.EXTRA_Y) if border is None else (border, border)
         self._pressed = False
+        self._hover = False
         if cursor is None:
             cursor = "hand2" if command is not None else ""
         super().__init__(master, text=text, font=font, fg=fg, bg=self._outer, bd=0,
@@ -242,6 +257,7 @@ class RoundButton(tk.Label):
                          cursor=cursor, **kw)
         self.bind("<ButtonPress-1>", self._on_press)
         self.bind("<ButtonRelease-1>", self._on_release)
+        self.bind("<Enter>", self._on_enter)
         self.bind("<Leave>", self._on_leave)
         self._render()
 
@@ -275,7 +291,7 @@ class RoundButton(tk.Label):
             elif key == "state":
                 self._state = str(value)
                 if self._state == "disabled":
-                    self._pressed = False
+                    self._pressed = self._hover = False
             elif key == "padx":
                 self._padx = int(value)
             elif key == "pady":
@@ -326,7 +342,9 @@ class RoundButton(tk.Label):
         h = line_h + 2 * (self._pady + self._extra[1])
         fill = self._fill
         if self._pressed:
-            fill = self._active_fill or _lighter(self._fill)
+            fill = self._active_fill or press_colour(self._fill)
+        elif self._hover and self._pressable():
+            fill = hover_colour(self._fill)
         fg = self._disabled_fg if self._state == "disabled" else self._fg
         img = photo(self, w, h, fill, self._outer, self._radius)
         self._image = img
@@ -348,9 +366,14 @@ class RoundButton(tk.Label):
         if 0 <= event.x < self.winfo_width() and 0 <= event.y < self.winfo_height():
             self.invoke()
 
+    def _on_enter(self, event):
+        if self._pressable() and not self._hover:
+            self._hover = True
+            self._render()
+
     def _on_leave(self, event):
-        if self._pressed:
-            self._pressed = False
+        if self._pressed or self._hover:
+            self._pressed = self._hover = False
             self._render()
 
 
@@ -637,3 +660,269 @@ class RoundSlider(tk.Canvas):
         self.create_image(0, round(y), anchor="nw", image=track_img)
         self.create_image(0, round(y), anchor="nw", image=fill_img)
         self.create_image(round(x - self.KNOB / 2), 1, anchor="nw", image=knob_img)
+
+
+class Switch(tk.Canvas):
+    """An on/off switch: a pill with a sliding knob. Green with a dark knob
+    when on, grey when off (Catppuccin: Base on an accent colour).
+
+    value / get() / set(on) change it without calling `command`; a click (or
+    invoke()) flips it and calls command(new_value). state="disabled" greys it
+    out and ignores clicks.
+    """
+
+    W, H, KNOB = 44, 24, 18
+    SLIDE_MS, SLIDE_STEPS = 120, 6
+
+    def __init__(self, master, value=False, command=None, on=theme.GREEN, off=theme.SURFACE2,
+                 knob_on=theme.BASE, knob_off=theme.OVERLAY2):
+        super().__init__(master, width=self.W, height=self.H, bg=master.cget("bg"),
+                         highlightthickness=0, bd=0, cursor="hand2")
+        self._value = bool(value)
+        self._command = command
+        self._colours = (on, off, knob_on, knob_off)
+        self._state = "normal"
+        self._hover = self._pressed = False
+        self._pos = 1.0 if self._value else 0.0      # knob position 0..1 (for the slide)
+        self._after = None
+        self.bind("<ButtonPress-1>", self._on_press)
+        self.bind("<ButtonRelease-1>", self._on_release)
+        self.bind("<Enter>", lambda e: self._set_hover(True))
+        self.bind("<Leave>", lambda e: self._set_hover(False))
+        self.bind("<Destroy>", lambda e: self._cancel(), add="+")
+        self._draw()
+
+    @property
+    def value(self):
+        return self._value
+
+    def get(self):
+        return self._value
+
+    def set(self, value):
+        self._value = bool(value)
+        self._cancel()
+        self._pos = 1.0 if self._value else 0.0
+        self._draw()
+
+    def invoke(self):
+        if self._state == "disabled":
+            return None
+        self._value = not self._value
+        self._slide()
+        if self._command is not None:
+            return self._command(self._value)
+        return None
+
+    def configure(self, cnf=None, **kw):
+        if isinstance(cnf, dict):
+            kw = {**cnf, **kw}
+        redraw = False
+        if "state" in kw:
+            self._state = str(kw.pop("state"))
+            redraw = True
+            super().configure(cursor="arrow" if self._state == "disabled" else "hand2")
+        if "command" in kw:
+            self._command = kw.pop("command")
+        if kw:
+            super().configure(**kw)
+        if redraw:
+            self._draw()
+
+    config = configure
+
+    def cget(self, key):
+        if key == "state":
+            return self._state
+        if key == "command":
+            return self._command
+        return super().cget(key)
+
+    def _set_hover(self, on):
+        self._hover = on and self._state != "disabled"
+        if not on:
+            self._pressed = False
+        self._draw()
+
+    def _on_press(self, event):
+        if self._state != "disabled":
+            self._pressed = True
+
+    def _on_release(self, event):
+        if self._pressed and 0 <= event.x < self.W and 0 <= event.y < self.H:
+            self._pressed = False
+            self.invoke()
+        self._pressed = False
+
+    def _cancel(self):
+        if self._after is not None:
+            try:
+                self.after_cancel(self._after)
+            except Exception:
+                pass
+            self._after = None
+
+    def _slide(self):
+        self._cancel()
+        target = 1.0 if self._value else 0.0
+        step = (target - self._pos) / self.SLIDE_STEPS
+
+        def tick(left=self.SLIDE_STEPS):
+            self._pos = target if left <= 1 else self._pos + step
+            self._draw()
+            self._after = self.after(self.SLIDE_MS // self.SLIDE_STEPS, tick, left - 1) \
+                if left > 1 else None
+        tick()
+
+    def _draw(self):
+        self.delete("all")
+        on, off, knob_on, knob_off = self._colours
+        if self._state == "disabled":
+            track_c, knob_c = theme.CONTROL, theme.DISABLED
+        else:
+            track_c = on if self._value else off
+            knob_c = knob_on if self._value else knob_off
+            if self._hover:
+                track_c = hover_colour(track_c)
+        track = photo(self, self.W, self.H, track_c, None, kind="capsule")
+        knob = photo(self, self.KNOB, self.KNOB, knob_c, None, kind="capsule")
+        self._images = (track, knob)
+        self.create_image(0, 0, anchor="nw", image=track)
+        pad = (self.H - self.KNOB) // 2
+        x = pad + self._pos * (self.W - self.KNOB - 2 * pad)
+        self.create_image(round(x), pad, anchor="nw", image=knob)
+
+
+class SegmentedControl(tk.Canvas):
+    """A pill of options with the selected one highlighted inside it (like
+    Apple's segmented controls). options: [(label, value, highlight colour)].
+
+    get()/set(value) change the selection without calling `command`; a click
+    (or invoke(value)) selects and calls command(value). Disabled options are
+    drawn dimmed; clicking one calls on_locked(value) instead.
+    """
+
+    def __init__(self, master, options, value, command=None, track=theme.SURFACE0,
+                 font=("Segoe UI", 10, "bold"), pad_x=14, height=32, inset=3, equal=True,
+                 on_locked=None):
+        bg = master.cget("bg")
+        widths = [_text_size(master, font, label)[0] + 2 * pad_x for label, _v, _c in options]
+        if equal:
+            widths = [max(widths)] * len(widths)
+        self._total = sum(widths) + 2 * inset
+        super().__init__(master, width=self._total, height=height, bg=bg,
+                         highlightthickness=0, bd=0, cursor="hand2")
+        self._bg, self._choices, self._widths = bg, list(options), widths
+        self._font, self._h, self._inset, self._track = font, height, inset, track
+        self._value = value
+        self._command, self._on_locked = command, on_locked
+        self._disabled = set()
+        self._hover = self._pressed = None
+        self.bind("<ButtonPress-1>", self._on_press)
+        self.bind("<ButtonRelease-1>", self._on_release)
+        self.bind("<Motion>", self._on_motion)
+        self.bind("<Leave>", lambda e: self._set_hover(None))
+        self._draw()
+
+    # ── API ──
+
+    def get(self):
+        return self._value
+
+    def set(self, value):
+        self._value = value
+        self._draw()
+
+    def invoke(self, value):
+        if value in self._disabled:
+            if self._on_locked is not None:
+                self._on_locked(value)
+            return None
+        if value == self._value:
+            return None
+        self._value = value
+        self._draw()
+        if self._command is not None:
+            return self._command(value)
+        return None
+
+    def set_disabled(self, values):
+        self._disabled = set(values)
+        self._draw()
+
+    def state_of(self, value):
+        return "disabled" if value in self._disabled else "normal"
+
+    def label_of(self, value):
+        return next(label for label, v, _c in self._choices if v == value)
+
+    def center_of(self, value):
+        x = self._inset
+        for (_label, v, _c), w in zip(self._choices, self._widths, strict=True):
+            if v == value:
+                return int(x + w / 2), self._h // 2
+            x += w
+        raise KeyError(value)
+
+    # ── mouse ──
+
+    def _value_at(self, x):
+        left = self._inset
+        for (_label, v, _c), w in zip(self._choices, self._widths, strict=True):
+            if left <= x < left + w:
+                return v
+            left += w
+        return None
+
+    def _on_press(self, event):
+        value = self._value_at(event.x)
+        if value in self._disabled:
+            self._pressed = None
+            if self._on_locked is not None:
+                self._on_locked(value)
+            return
+        self._pressed = value
+
+    def _on_release(self, event):
+        value = self._value_at(event.x) if 0 <= event.y < self._h else None
+        if value is not None and value == self._pressed:
+            self.invoke(value)
+        self._pressed = None
+
+    def _on_motion(self, event):
+        value = self._value_at(event.x)
+        self.configure(cursor="arrow" if value in self._disabled or value == self._value
+                       else "hand2")
+        self._set_hover(value)
+
+    def _set_hover(self, value):
+        if value != self._hover:
+            self._hover = value
+            self._draw()
+
+    def _draw(self):
+        self.delete("all")
+        track = photo(self, self._total, self._h, self._track, self._bg, RADIUS_CONTROL)
+        images = [track]
+        self.create_image(0, 0, anchor="nw", image=track)
+        x = self._inset
+        inner_h = self._h - 2 * self._inset
+        for (label, value, colour), w in zip(self._choices, self._widths, strict=True):
+            selected = value == self._value
+            disabled = value in self._disabled
+            if selected or (value == self._hover and not disabled):
+                fill = colour if selected else hover_colour(self._track)
+                pill = photo(self, w, inner_h, fill, None, RADIUS_CONTROL - 2)
+                images.append(pill)
+                self.create_image(x, self._inset, anchor="nw", image=pill)
+            if selected:
+                text_c = theme.ON_ACCENT
+            elif disabled:
+                text_c = theme.DISABLED
+            elif value == self._hover:
+                text_c = theme.TEXT
+            else:
+                text_c = theme.LABEL
+            self.create_text(x + w / 2, self._h / 2, text=label, font=self._font, fill=text_c)
+            x += w
+        self._images = images

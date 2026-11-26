@@ -20,6 +20,19 @@
 - **Playlist and mode locked while monitoring.** The playlist folder and the
   Single File / Playlist mode can't be changed while monitoring is on (Browse
   and the other mode are greyed out); stop monitoring to change them.
+- **Switches and segmented controls.** On/off settings (Fade, Mirroring Fix,
+  Check for updates, Start with Windows) are switches with a sliding knob.
+  The tabs, Single File / Playlist and the loop modes are segmented pills
+  with the selection highlighted inside; while monitoring, the other mode is
+  greyed out within the pill. Buttons and pills light up under the mouse.
+- **Title bar in the theme's colours** on Windows 11 (a dark title bar on
+  Windows 10), instead of a light bar over the dark window.
+- **One window height for every tab.** The window fits the tallest tab
+  (measured with the fonts in use) and never resizes when switching tabs; the
+  Advanced tab lost its redundant heading and puts Check for updates and
+  Start with Windows in one card. It only grows while a notice bar is shown.
+- **Playing now.** Exclude Apps lists the apps making sound right now; one
+  click excludes one (typing a name still works).
 - **Catppuccin Frappé colours.** The theme moves from Catppuccin Mocha to the
   softer Frappé flavour, using the official palette and Catppuccin's style
   guide for each role (Base window, Mantle status bar, Surface cards and

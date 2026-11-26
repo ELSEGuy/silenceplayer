@@ -47,3 +47,12 @@ def test_app_name_uses_the_icon_purple(appmod, root, cfg_path, fast_timing):
     assert a.title_label.cget("text") == "Silence Player"
     assert a.title_label.cget("fg") == theme.BRAND
     a.monitor.stop(wait=True)
+
+
+def test_title_bar_colours():
+    from silenceplayer.ui import titlebar
+    assert titlebar.colorref("#303446") == 0x463430          # COLORREF is 0x00bbggrr
+    assert titlebar.colorref("#ffffff") == 0xFFFFFF
+    import sys
+    if sys.platform != "win32":
+        assert titlebar.color_title_bar(object()) is False   # nothing to do elsewhere
