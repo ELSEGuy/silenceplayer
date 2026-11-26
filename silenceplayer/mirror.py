@@ -26,7 +26,7 @@ if ProcessAudioCapture is not None:
         """ProcTap's per-process capture with a gentler reader thread.
 
         ProcTap's own reader asks for new audio every millisecond (measured
-        on Windows: 3.1-3.3% of a CPU core for three watched processes, even
+        on Windows: 1.2-3.3% of a CPU core for three watched processes, even
         with nothing playing). Each read returns one ~10 ms packet, so this
         reader wakes every POLL_SECONDS, empties the buffer and hands all of
         it to the callback in one go (measured: 0.6-0.8%, same audio).
