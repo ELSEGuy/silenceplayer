@@ -225,3 +225,57 @@ def test_removing_app_from_list_stops_its_taps(appmod):
     fix._sync_taps()
     assert set(fix._taps) == {1}
     assert [t.stopped for t in sorted(FakeTap.instances, key=lambda t: t.pid)] == [False, True]
+
+
+# ── quiet / bursty audio ─────────────────────────────────────────────────────
+
+def test_one_loud_chunk_in_two_seconds_counts_as_real(fix_env):
+    """A stream with gaps in its sound must not flip to 'mirroring only'."""
+    fix, clock, pids = fix_env
+    fix._sync_taps()
+    tap = FakeTap.instances[0]
+    clock.t += 3
+    tap.feed(0.05)
+    for _ in range(50):                               # silence after the burst
+        clock.t += 0.02
+        tap.feed(0.0)
+    assert fix.is_real_audio("discord.exe") is True
+    clock.t += fix.STALE_AFTER_SECONDS + 0.1          # the burst is now old
+    tap.feed(0.0)
+    assert fix.is_real_audio("discord.exe") is False
+
+
+def test_window_covers_the_whole_stale_period(fix_env):
+    fix, clock, pids = fix_env
+    fix._sync_taps()
+    tap = FakeTap.instances[0]
+    clock.t += 3
+    tap.feed(0.1)
+    for _ in range(100):                              # 100 quiet 10 ms chunks follow
+        clock.t += 0.01
+        tap.feed(0.0)
+    assert fix.is_real_audio("discord.exe") is True
+
+
+def test_verdict_log_includes_levels(fix_env, appmod):
+    import logging
+
+    records = []
+
+    class Grab(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = Grab(level=logging.INFO)
+    appmod.log.addHandler(handler)          # the app logger doesn't propagate to root
+    try:
+        fix, clock, pids = fix_env
+        fix._sync_taps()
+        tap = FakeTap.instances[0]
+        clock.t += 3
+        tap.feed(0.0)
+        fix.is_real_audio("discord.exe")
+    finally:
+        appmod.log.removeHandler(handler)
+    text = " ".join(records)
+    assert "mirroring only" in text and "PID 111" in text and "loudest" in text

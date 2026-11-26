@@ -22,7 +22,7 @@ import pystray
 from PIL import Image, ImageDraw, ImageTk
 
 APP_NAME    = "SilencePlayer"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 
 log = logging.getLogger("silenceplayer")
 
@@ -522,6 +522,8 @@ SUPPORTED_LABEL = "MP3, OPUS, M4A, FLAC, MP4"
 # How long after the ambient sound starts a *new* "external" sound counts as
 # suspicious (an app reacting to our own sound), on top of the start cooldown.
 MIRROR_SUSPECT_SECONDS = 6.0
+# Mirroring apps keep showing a level for a moment after our sound has ended.
+MIRROR_TAIL_SECONDS = 1.5
 
 
 def collect_playlist(folder):
@@ -607,6 +609,19 @@ def plan_playlist_start(folder, files, resume):
 # Windows audio sessions
 # ─────────────────────────────────────────────────────────────────────────────
 
+class PlayingApps(set):
+    """Names of the apps producing sound right now.
+
+    `excluded_audible` holds the *excluded* apps that are audible too. They
+    don't count as playing, but they are something a mirroring app (Discord,
+    SignalRGB, ...) can be reacting to, which the Mirroring Fix needs to know.
+    """
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.excluded_audible = set()
+
+
 def get_playing_apps(excluded=None):
     """Names of processes currently producing audio.
 
@@ -614,7 +629,7 @@ def get_playing_apps(excluded=None):
     mistake "pycaw is broken" for "the PC is silent" and start playing over
     whatever is actually going on.
     """
-    playing = set()
+    playing = PlayingApps()
     excluded_set = set(e.lower() for e in (excluded or []))
     own_pid = os.getpid()
     sessions = AudioUtilities.GetAllSessions()
@@ -628,12 +643,15 @@ def get_playing_apps(excluded=None):
             if proc.pid == own_pid:
                 continue
             name = proc.name().lower()
-            if name in OWN_PROCESSES or name in excluded_set:
+            if name in OWN_PROCESSES:
                 continue
             meter = session._ctl.QueryInterface(IAudioMeterInformation)
             peak = meter.GetPeakValue()
             if peak > 0.001:
-                playing.add(name)
+                if name in excluded_set:
+                    playing.excluded_audible.add(name)
+                else:
+                    playing.add(name)
         except Exception as e:
             # Processes exit between listing and querying; that's normal.
             log_throttled("session_query", logging.DEBUG,
@@ -842,7 +860,7 @@ class MirrorFix:
     """
 
     REAL_AUDIO_THRESHOLD = 0.001
-    WINDOW_SIZE          = 10
+    WINDOW_SIZE          = 256    # enough chunks to cover STALE_AFTER_SECONDS
     MIN_SAMPLES          = 3      # samples needed to judge a tap during warm-up
     WARMUP_SECONDS       = 2.0    # a new tap counts as "unknown" (→ real) at most this long
     STALE_AFTER_SECONDS  = 2.0    # PCM older than this is not current audio
@@ -1016,7 +1034,19 @@ class MirrorFix:
         if not fresh:
             # Nothing rendered recently (or the stream went quiet): not current audio.
             return "silent"
-        return "active" if float(np.mean(fresh)) > self.REAL_AUDIO_THRESHOLD else "silent"
+        # Any recent sound counts, like the peak meter pycaw reads. Averaging
+        # the last few chunks made quiet or bursty audio (a stream with gaps in
+        # its sound) flip between "real" and "mirroring only".
+        return "active" if max(fresh) > self.REAL_AUDIO_THRESHOLD else "silent"
+
+    def _describe(self, taps, now):
+        """One line per-tap levels for the log: PID, chunks heard recently, loudest."""
+        parts = []
+        for st in taps:
+            fresh = [rms for (t, rms) in st.samples if now - t <= self.STALE_AFTER_SECONDS]
+            loudest = max(fresh) if fresh else 0.0
+            parts.append(f"PID {st.pid}: {len(fresh)} chunks, loudest {loudest:.4f}")
+        return "; ".join(parts) if parts else "no taps"
 
     def is_real_audio(self, name):
         """
@@ -1038,10 +1068,12 @@ class MirrorFix:
                     if c != "silent":
                         verdict, why = True, f"PID {st.pid} {c}"
                         break
-        if verdict != self._last_verdict.get(name):
+            changed = verdict != self._last_verdict.get(name)
+            detail = self._describe(taps, now) if changed else ""
+        if changed:
             self._last_verdict[name] = verdict
-            log.info("%s classified as %s (%s)", name,
-                     "real audio" if verdict else "mirroring only", why)
+            log.info("%s classified as %s (%s; %s)", name,
+                     "real audio" if verdict else "mirroring only", why, detail)
         return verdict
 
 
@@ -1057,6 +1089,8 @@ class _MonitorState:
         self.ducked            = False
         self.unduck_start      = None
         self.ambient_started_at = 0.0
+        self.ambient_audible_at = float("-inf")    # last time our own sound could be heard
+        self.mirror_note       = (frozenset(), frozenset())   # what we last logged
 
 
 class AudioMonitor:
@@ -1143,13 +1177,45 @@ class AudioMonitor:
                               "Monitor cycle failed", exc_info=True)
         log.info("Monitoring stopped")
 
-    def _apply_mirror_fix(self, raw_apps, settings):
+    @staticmethod
+    def _ambient_audible(player):
+        """True while our own sound can be heard, fade-out after stop() included."""
+        audible = getattr(player, "audible", None)
+        return bool(player.playing if audible is None else audible)
+
+    def _apply_mirror_fix(self, raw_apps, settings, can_mirror=True):
+        """Drop apps that only mirror other sound.
+
+        A mirroring app can only show a level when there is something to
+        mirror: our ambient sound, or an excluded app that is playing. If
+        neither is audible, its level is real (for example someone's Discord
+        stream), so the app is not checked and counts as playing. Checking it
+        anyway made stream audio look like "mirroring" whenever the tap
+        happened to read silence.
+        """
         fix = self.app.mirror_fix
-        if not (settings.mirror_fix and fix is not None and settings.mirror_apps):
+        if not (settings.mirror_fix and fix is not None and settings.mirror_apps
+                and can_mirror):
             return raw_apps
         # Apps on the mirroring list only count if they really output sound.
         return {name for name in raw_apps
                 if name not in settings.mirror_apps or fix.is_real_audio(name)}
+
+    @staticmethod
+    def _log_mirror_decision(s, raw_apps, current_apps, settings, can_mirror):
+        """Log (on change only) when a mirroring-list app is ignored or let through."""
+        listed = frozenset(n for n in raw_apps if n in settings.mirror_apps)
+        ignored = listed - frozenset(current_apps)
+        unchecked = listed if (settings.mirror_fix and not can_mirror) else frozenset()
+        note = (ignored, unchecked)
+        if note == s.mirror_note:
+            return
+        s.mirror_note = note
+        if ignored:
+            log.info("Ignoring %s: it only mirrors other sound", ", ".join(sorted(ignored)))
+        if unchecked:
+            log.info("%s is making sound and there is nothing for it to mirror; "
+                     "counting it as playing", ", ".join(sorted(unchecked)))
 
     def _check_suspects(self, s, current_apps, settings, now):
         """An app that starts "playing" right after our ambient sound starts is
@@ -1168,10 +1234,16 @@ class AudioMonitor:
         raw_apps = self._get_playing_apps(settings.excluded)
         if stop_event.is_set():
             return
-        current_apps = self._apply_mirror_fix(raw_apps, settings)
-        names = ", ".join(sorted(current_apps))
         player = app.player
         now = self._clock()
+        if s.ambient_triggered or self._ambient_audible(player):
+            s.ambient_audible_at = now
+        excluded_audible = getattr(raw_apps, "excluded_audible", None)
+        can_mirror = bool(excluded_audible) or (
+            now - s.ambient_audible_at <= MIRROR_TAIL_SECONDS)
+        current_apps = self._apply_mirror_fix(raw_apps, settings, can_mirror)
+        self._log_mirror_decision(s, raw_apps, current_apps, settings, can_mirror)
+        names = ", ".join(sorted(current_apps))
 
         if s.ambient_triggered:
             if now < s.cooldown_until:
@@ -1387,6 +1459,13 @@ class AmbientPlayer:
         with self._lock:
             s = self._session
             return s is not None and not s.finished and not s.stop_event.is_set()
+
+    @property
+    def audible(self):
+        """True while our sound may still be coming out, including the fade-out
+        after stop() (the session ends only once the fade is over)."""
+        with self._lock:
+            return self._session is not None
 
     @property
     def resume_state(self):

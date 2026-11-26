@@ -275,3 +275,166 @@ def test_audio_long_after_ambient_is_not_suggested(appmod, make_config):
     mon._tick(state, ev)
     assert app.player.stops == 1
     assert app.suspects == []
+
+
+# ── Mirroring Fix only applies when there is something to mirror ─────────────
+# Bug: watching someone's Discord stream. The Mirroring Fix judged Discord
+# "mirroring only" even though its stream audio was real, so the silence timer
+# was never reset and ambient started over the stream.
+
+class FlexFix:
+    """Verdicts can change during a test, like real ProcTap readings."""
+
+    def __init__(self, real=None):
+        self.real = dict(real or {})
+        self.asked = []
+
+    def is_real_audio(self, name):
+        self.asked.append(name)
+        return self.real.get(name, True)
+
+
+def _playing(appmod, names, excluded_audible=()):
+    result = appmod.PlayingApps(names)
+    result.excluded_audible = set(excluded_audible)
+    return result
+
+
+class AudiblePlayer(StubPlayer):
+    """Like AmbientPlayer: still audible while fading out after stop()."""
+
+    def __init__(self):
+        super().__init__()
+        self.audible = False
+
+    def play(self, config):
+        self.audible = True
+        return super().play(config)
+
+
+def test_stream_audio_resets_timer_even_if_taps_read_silent(appmod, make_config):
+    clock = Clock()
+    apps = {"discord.exe"}
+    app, mon = make_monitor(appmod, make_config, lambda ex: _playing(appmod, apps),
+                            clock=clock, silence_seconds=5)
+    app.mirror_fix = FlexFix({"discord.exe": False})      # the tap wrongly says "silent"
+    state, ev = appmod._MonitorState(), threading.Event()
+    for _ in range(120):                                  # a minute of streaming
+        mon._tick(state, ev)
+        clock.t += 0.5
+    assert app.player.plays == 0, "ambient started over the stream"
+    assert state.silence_start is None
+    assert app.mirror_fix.asked == [], "nothing to mirror: no need to ask the tap"
+
+
+def test_discord_stream_scenario_from_the_bug_report(appmod, make_config):
+    """Stream plays → stream ends → ambient starts → stream audio returns →
+    ambient stops → the stream keeps playing: the timer must keep resetting."""
+    clock = Clock()
+    apps = set()
+    app, mon = make_monitor(appmod, make_config, lambda ex: _playing(appmod, apps),
+                            clock=clock, silence_seconds=5, duck_percent=0)
+    app.player = AudiblePlayer()
+    app.mirror_fix = FlexFix({"discord.exe": True})
+    state, ev = appmod._MonitorState(), threading.Event()
+
+    def run(seconds):
+        for _ in range(int(seconds * 2)):
+            mon._tick(state, ev)
+            clock.t += 0.5
+
+    run(1)
+    run(6)                                                # silence → ambient starts
+    assert app.player.plays == 1 and state.ambient_triggered
+    run(5)                                                # past the start cooldown
+    apps.add("discord.exe")                               # stream audio arrives
+    run(1)
+    assert app.player.stops == 1 and not state.ambient_triggered
+
+    app.player.audible = False                            # fade-out is over
+    app.mirror_fix.real["discord.exe"] = False            # taps now read "silent"
+    run(60)                                               # stream keeps playing
+    assert app.player.plays == 1, "ambient restarted while the stream was playing"
+    assert state.silence_start is None
+
+
+def test_mirror_app_still_ignored_while_an_excluded_app_plays(appmod, make_config):
+    """SignalRGB mirroring an excluded app's sound must not block ambient."""
+    clock = Clock()
+    app, mon = make_monitor(
+        appmod, make_config,
+        lambda ex: _playing(appmod, {"signalrgb.exe"}, excluded_audible={"spotify.exe"}),
+        clock=clock, silence_seconds=5)
+    app.mirror_fix = FlexFix({"signalrgb.exe": False})
+    state, ev = appmod._MonitorState(), threading.Event()
+    mon._tick(state, ev)
+    clock.t += 6
+    mon._tick(state, ev)
+    assert app.player.plays == 1
+
+
+def test_mirror_filter_stays_on_while_ambient_fades_out(appmod, make_config):
+    clock = Clock()
+    apps = set()
+    app, mon = make_monitor(appmod, make_config, lambda ex: _playing(appmod, apps),
+                            clock=clock, silence_seconds=5, duck_percent=0)
+    app.player = AudiblePlayer()
+    app.mirror_fix = FlexFix({"signalrgb.exe": False})
+    state, ev = appmod._MonitorState(), threading.Event()
+    mon._tick(state, ev)
+    clock.t += 6
+    mon._tick(state, ev)                                  # ambient starts
+    clock.t += 5
+    apps.add("spotify.exe")
+    mon._tick(state, ev)                                  # stops → fading out
+    assert not state.ambient_triggered and app.player.audible
+
+    apps.clear()
+    apps.add("signalrgb.exe")                             # still mirroring the fade-out
+    clock.t += 0.5
+    mon._tick(state, ev)
+    assert state.silence_start is not None                # ignored
+
+    app.player.audible = False                            # fade-out over, tail passes
+    clock.t += appmod.MIRROR_TAIL_SECONDS + 0.5
+    mon._tick(state, ev)
+    assert state.silence_start is None                    # now it counts as real
+
+
+def test_get_playing_apps_reports_audible_excluded_apps(appmod, monkeypatch):
+    import os
+
+    class Proc:
+        def __init__(self, pid, name):
+            self.pid, self._name = pid, name
+
+        def name(self):
+            return self._name
+
+    class Meter:
+        def __init__(self, peak):
+            self.peak = peak
+
+        def GetPeakValue(self):
+            return self.peak
+
+    class Ctl:
+        def __init__(self, peak):
+            self.peak = peak
+
+        def QueryInterface(self, iface):
+            return Meter(self.peak)
+
+    class Session:
+        def __init__(self, pid, name, peak):
+            self.Process, self._ctl = Proc(pid, name), Ctl(peak)
+
+    base = os.getpid()
+    monkeypatch.setattr(appmod.AudioUtilities, "sessions", [
+        Session(base + 1, "spotify.exe", 0.5),       # excluded and audible
+        Session(base + 2, "vlc.exe", 0.0),           # excluded, silent
+        Session(base + 3, "discord.exe", 0.4),
+    ], raising=False)
+    result = appmod.get_playing_apps(["spotify.exe", "vlc.exe"])
+    assert result == {"discord.exe"}
+    assert result.excluded_audible == {"spotify.exe"}

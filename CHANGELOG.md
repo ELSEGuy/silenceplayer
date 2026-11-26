@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.3.1
+
+### Fixed
+- **Watching someone's Discord stream didn't reset the silence timer.** Silence
+  Player started the ambient sound over the stream, stopped it again a moment
+  later, and then started the countdown anew even though the stream was still
+  playing. The Mirroring Fix is now only used when there is something for an
+  app to mirror: your ambient sound, or an excluded app that is playing. In
+  every other case Discord's sound counts as real audio.
+- **Quiet or bursty audio could be mistaken for "mirroring only".** The Mirroring
+  Fix now looks at the loudest sound in the last two seconds instead of an
+  average of the last few moments.
+- The log now shows what the Mirroring Fix heard (per process) whenever it
+  changes its mind about an app, which makes problems like this easier to track
+  down.
+
 ## v1.3.0 (stable)
 
 Stability release, plus a few improvements found during testing.

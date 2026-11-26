@@ -397,3 +397,20 @@ def test_session_volume_falls_back_to_vlc(appmod):
     assert calls == [0.125]              # VLC's mapping: (50 %)³
     none = appmod._SessionVolume(pid=42, sessions_source=lambda: [])
     assert none.set(50) is False
+
+
+def test_audible_until_fade_out_has_finished(player_factory, make_config, audio_files,
+                                             fast_timing, monkeypatch, appmod):
+    """The monitor keeps the Mirroring Fix on while our own sound can be heard."""
+    monkeypatch.setattr(appmod, "FADE_SECONDS", 0.5)
+    folder, (rain,) = audio_files("rain.mp3")
+    cfg = make_config(mode="single", mp3_path=rain, fade_enabled=True)
+    app, player, mp = player_factory(cfg)
+    assert not player.audible
+    player.play(cfg)
+    _wait_loaded(mp, 1, player)
+    assert player.audible
+    player.stop()
+    assert not player.playing and player.audible       # fading out
+    _wait_finished(player)
+    assert not player.audible
