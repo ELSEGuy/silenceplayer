@@ -47,6 +47,7 @@ class MarqueeLabel(tk.Canvas):
             self.create_image(0, 0, anchor="nw", image=self._field)
         self._animate = animate
         self._hover = False
+        self._suspended = False
         self._after = None
         self._offset = 0.0
         self._text_w = 0
@@ -109,6 +110,11 @@ class MarqueeLabel(tk.Canvas):
                 pass
             self._after = None
 
+    def suspend(self, on):
+        """Stop scrolling while out of sight (e.g. its tab isn't in front)."""
+        self._suspended = bool(on)
+        self._last = None
+
     def _set_hover(self, on):
         self._hover = on
         self._last = None   # don't jump forward by the paused time
@@ -146,7 +152,7 @@ class MarqueeLabel(tk.Canvas):
         self._after = None
         if not self._scrolling:
             return
-        if self._hover or not self.winfo_viewable():
+        if self._hover or self._suspended or not self.winfo_viewable():
             self._last = None
             self._after = self.after(200, self._tick)
             return

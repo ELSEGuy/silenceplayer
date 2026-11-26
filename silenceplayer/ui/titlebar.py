@@ -17,6 +17,8 @@ DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19     # Windows 10 before version 20H1
 DWMWA_BORDER_COLOR = 34
 DWMWA_CAPTION_COLOR = 35
 DWMWA_TEXT_COLOR = 36
+DWMWA_WINDOW_CORNER_PREFERENCE = 33
+DWMWCP_ROUND = 2
 
 
 def colorref(colour):
@@ -40,6 +42,11 @@ def color_title_bar(win, caption=theme.BG, text=theme.TEXT, border=theme.CARD):
             if dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(dark),
                                          ctypes.sizeof(dark)) == 0:
                 break
+        # Keep Windows 11's rounded window corners (the window is see-through
+        # capable for a flash-free reveal, which could otherwise drop them).
+        corner = ctypes.c_int(DWMWCP_ROUND)
+        dwm.DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ctypes.byref(corner),
+                                  ctypes.sizeof(corner))
         accepted = True
         for attr, colour in ((DWMWA_CAPTION_COLOR, caption), (DWMWA_TEXT_COLOR, text),
                              (DWMWA_BORDER_COLOR, border)):

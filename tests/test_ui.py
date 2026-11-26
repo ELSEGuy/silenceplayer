@@ -525,3 +525,44 @@ def test_playing_now_survives_a_broken_audio_list(appmod, root, cfg_path, fast_t
     assert _chips(a) == ["nothing right now"]
     a._stop_playing_now()
     a.monitor.stop(wait=True)
+
+
+# ── no flashes: stacked tabs, invisible redraw when reopening ────────────────
+
+def test_tabs_are_stacked_and_switching_only_raises(appmod, root, cfg_path, fast_timing):
+    a = make_app(appmod, root)
+    a._show_window()
+    pump(root, 0.1)
+    tabs = (a.tab_main, a.tab_exclude, a.tab_advanced)
+    assert all(t.winfo_manager() == "grid" for t in tabs), "all tabs stay laid out"
+    for name in ("exclude", "advanced", "main"):
+        a.tabs.invoke(name)
+        pump(root, 0.05)
+        assert all(t.winfo_ismapped() for t in tabs), "nothing is hidden and re-shown"
+    assert a.mode_pill.label_of("single") == "Single"
+    a.monitor.stop(wait=True)
+
+
+def test_scrolling_names_pause_on_other_tabs(appmod, root, cfg_path, fast_timing):
+    a = make_app(appmod, root)
+    a._show_window()
+    a.tabs.invoke("advanced")
+    assert a.np_title._suspended and a.mp3_entry._suspended
+    a.tabs.invoke("main")
+    assert not a.np_title._suspended and not a.mp3_entry._suspended
+    a.monitor.stop(wait=True)
+
+
+def test_reopening_draws_before_showing(appmod, root, cfg_path, fast_timing, monkeypatch):
+    a = make_app(appmod, root)
+    alphas = []
+    monkeypatch.setattr(a, "_set_alpha", alphas.append)
+    root.withdraw()
+    a._show_window()
+    assert root.state() != "withdrawn"
+    assert alphas == [0.0], "shown invisible first"
+    pump(root, (a.REVEAL_MS + 60) / 1000)
+    assert alphas == [0.0, a.OPAQUE], "then made visible once drawn"
+    a._show_window()                                  # already shown: no blink
+    assert alphas == [0.0, a.OPAQUE]
+    a.monitor.stop(wait=True)

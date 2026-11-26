@@ -3,6 +3,7 @@
 import logging
 import os
 import queue
+import sys
 import threading
 import time
 import tkinter as tk
@@ -78,6 +79,7 @@ class App:
         self.root.geometry(f"{self.WINDOW_W}x{self.WINDOW_H}")
         self.root.resizable(False, False)
         self.root.configure(bg=theme.BG)
+        self._set_alpha(0.0)               # shown once drawn (see _show_window)
         self.root.protocol("WM_DELETE_WINDOW", self._on_window_close)
         self.root.report_callback_exception = self._report_tk_exception
 
@@ -131,6 +133,7 @@ class App:
         self.WINDOW_H = self._measure_height()
         self.root.geometry(f"{self.WINDOW_W}x{self.WINDOW_H}")
         color_title_bar(self.root)
+        self._reveal_id = self.root.after(self.REVEAL_MS, lambda: self._set_alpha(self.OPAQUE))
         self.root.after(self.UI_POLL_MS, self._drain_ui_queue)
         threading.Thread(target=self._build_tray, daemon=True, name="Tray").start()
         self.root.after(0, self._refresh_now_playing)
@@ -144,6 +147,8 @@ class App:
             if config_notice:
                 self.set_status(config_notice)
             else:
+                # Straight to the tray: stays invisible (never revealed) until opened.
+                self.root.after_cancel(self._reveal_id)
                 self.root.after(100, self.root.withdraw)
         else:
             # First run (or the saved file/folder is gone): keep Settings open.
@@ -291,21 +296,11 @@ class App:
     def _measure_height(self):
         """Height that fits the tallest tab, with room for a two-line status
         message (long messages wrap) and a margin under the last card."""
-        self.root.update_idletasks()
-        tabs = (self.tab_main, self.tab_exclude, self.tab_advanced)
-        shown = next((t for t in tabs if t.winfo_manager() == "pack"), self.tab_main)
+        # The tabs share one place, so the window already asks for the tallest.
         status = self.status_var.get()
         self.status_var.set("Measuring\nthe status line")
-        needed = 0
-        for tab in tabs:
-            for t in tabs:
-                t.pack_forget()
-            tab.pack(fill="both", expand=True)
-            self.root.update_idletasks()
-            needed = max(needed, self.root.winfo_reqheight())
-        for t in tabs:
-            t.pack_forget()
-        shown.pack(fill="both", expand=True)
+        self.root.update_idletasks()
+        needed = self.root.winfo_reqheight()
         self.status_var.set(status)
         return needed + self.BOTTOM_MARGIN
 
@@ -498,8 +493,25 @@ class App:
 
     # ── window ──
 
+    # Windows throws away a hidden window's picture, so it came back white and
+    # filled in piece by piece. It is now drawn while still invisible, then shown.
+    OPAQUE = 0.999       # not 1.0: Tk would change the window's kind and repaint it
+    REVEAL_MS = 80       # time to draw everything before it becomes visible
+
+    def _set_alpha(self, value):
+        if sys.platform == "win32":
+            try:
+                self.root.attributes("-alpha", value)
+            except tk.TclError:
+                pass
+
     def _show_window(self):
-        self.root.deiconify()
+        if self.root.state() == "withdrawn":
+            self._set_alpha(0.0)
+            self.root.deiconify()
+            self.root.after(self.REVEAL_MS, lambda: self._set_alpha(self.OPAQUE))
+        else:
+            self.root.deiconify()
         self.root.lift()
         self.root.focus_force()
         self._on_tab_changed(self.tabs.get())
@@ -589,16 +601,22 @@ class App:
         tab_bar = tk.Frame(self.root, bg=BG)
         tab_bar.pack(pady=(10, 0))
 
-        self.tab_main     = tk.Frame(self.root, bg=BG)
-        self.tab_exclude  = tk.Frame(self.root, bg=BG)
-        self.tab_advanced = tk.Frame(self.root, bg=BG)
+        # The three tabs are stacked in the same place and stay drawn; switching
+        # brings one to the front. (Hiding one and showing another made Windows
+        # repaint everything from an empty background: a flash of dark bars.)
+        tab_area = tk.Frame(self.root, bg=BG)
+        tab_area.rowconfigure(0, weight=1)
+        tab_area.columnconfigure(0, weight=1)
+        self.tab_main     = tk.Frame(tab_area, bg=BG)
+        self.tab_exclude  = tk.Frame(tab_area, bg=BG)
+        self.tab_advanced = tk.Frame(tab_area, bg=BG)
+        for tab_frame in (self.tab_main, self.tab_exclude, self.tab_advanced):
+            tab_frame.grid(row=0, column=0, sticky="nsew")
 
         def switch_tab(tab):
-            self.tab_main.pack_forget()
-            self.tab_exclude.pack_forget()
-            self.tab_advanced.pack_forget()
             {"main": self.tab_main, "exclude": self.tab_exclude,
-             "advanced": self.tab_advanced}[tab].pack(fill="both", expand=True)
+             "advanced": self.tab_advanced}[tab].tkraise()
+            self.root.focus_set()            # typing never goes to a tab out of sight
             self.tabs.set(tab)
             self._on_tab_changed(tab)
 
@@ -614,7 +632,8 @@ class App:
         self._build_exclude_tab(self.tab_exclude, BG, CARD, FG, ACC, BTN_BG, DIM)
         self._build_advanced_tab(self.tab_advanced, BG, CARD, FG, ACC, BTN_BG, DIM)
 
-        self.tab_main.pack(fill="both", expand=True)
+        tab_area.pack(fill="both", expand=True)
+        self.tab_main.tkraise()
 
         status_frame = tk.Frame(self.root, bg=theme.PANE)
         status_frame.pack(fill="x", side="bottom")
@@ -688,7 +707,7 @@ class App:
             self.config["mode"] = val
             _refresh_mode()
 
-        self.mode_pill = SegmentedControl(mode_frame, [("Single File", "single", ACC),
+        self.mode_pill = SegmentedControl(mode_frame, [("Single", "single", ACC),
                                                        ("Playlist", "playlist", ACC)],
                                           self.mode_var.get(), command=on_mode,
                                           track=theme.CARD, on_locked=self._mode_locked_hint)
@@ -1214,6 +1233,9 @@ class App:
         return True
 
     def _on_tab_changed(self, tab):
+        # Scrolling names only move while their tab is in front.
+        for marquee in (self.np_title, self.mp3_entry, self.playlist_entry):
+            marquee.suspend(tab != "main")
         if tab == "exclude" and self.root.state() != "withdrawn":
             self._start_playing_now()
         else:

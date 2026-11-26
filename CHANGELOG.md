@@ -22,7 +22,7 @@
   and the other mode are greyed out); stop monitoring to change them.
 - **Switches and segmented controls.** On/off settings (Fade, Mirroring Fix,
   Check for updates, Start with Windows) are switches with a sliding knob.
-  The tabs, Single File / Playlist and the loop modes are segmented pills
+  The tabs, Single / Playlist and the loop modes are segmented pills
   with the selection highlighted inside; while monitoring, the other mode is
   greyed out within the pill. Buttons and pills light up under the mouse.
 - **Title bar in the theme's colours** on Windows 11 (a dark title bar on
@@ -31,6 +31,10 @@
   (measured with the fonts in use) and never resizes when switching tabs; the
   Advanced tab lost its redundant heading and puts Check for updates and
   Start with Windows in one card. It only grows while a notice bar is shown.
+- **No flashes.** Switching tabs no longer shows dark bars for a moment (the
+  tabs stay drawn and the chosen one is brought to the front), and reopening
+  the window from the tray no longer shows it white while it fills in (it is
+  drawn while still invisible, then shown).
 - **Playing now.** Exclude Apps lists the apps making sound right now; one
   click excludes one (typing a name still works).
 - **Catppuccin Frappé colours.** The theme moves from Catppuccin Mocha to the
