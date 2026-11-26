@@ -118,7 +118,8 @@ def test_source_command_uses_pythonw_and_the_full_path_of_app_py(appmod, monkeyp
     monkeypatch.setattr(sys, "executable", str(tmp_path / "python.exe"))
     cmd = appmod.startup_command()
     assert cmd.startswith(f'"{tmp_path / "pythonw.exe"}"')
-    assert cmd.endswith(f'"{os.path.abspath(appmod.__file__)}"')
+    assert cmd.endswith(f'"{appmod.LAUNCHER}"')
+    assert appmod.LAUNCHER.endswith("app.py") and os.path.isfile(appmod.LAUNCHER)
 
 
 def test_source_command_without_pythonw_keeps_the_interpreter(appmod, monkeypatch, tmp_path):

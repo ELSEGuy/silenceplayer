@@ -28,9 +28,7 @@ def test_parse_int_field_ok(appmod):
 
 def test_validation_does_not_use_assert(appmod):
     # Must still reject bad input when Python runs with -O (asserts stripped).
-    import inspect
-    src = inspect.getsource(appmod)
-    assert "assert " not in src
+    assert "assert " not in appmod.all_source_code
 
 
 def test_display_name(appmod, tmp_path):

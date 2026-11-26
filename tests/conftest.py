@@ -208,7 +208,59 @@ except ImportError:
     sys.modules["tkinter.messagebox"] = tk_mod.messagebox
 
 
-import app as app_module  # noqa: E402
+import importlib  # noqa: E402
+import pkgutil  # noqa: E402
+
+import silenceplayer  # noqa: E402
+
+_MISSING = object()
+
+
+class _Package(types.ModuleType):
+    """One place for tests to reach everything in the silenceplayer package.
+
+    Reading appmod.X finds X in the module that has it. Setting appmod.X
+    (e.g. with monkeypatch.setattr) changes X in every module that has a
+    name X, so a test can swap a function or a constant no matter which
+    module uses it. (Each name means the same thing in every module.)
+    """
+
+    def __init__(self, modules):
+        super().__init__("appmod")
+        object.__setattr__(self, "_modules", modules)
+        for module in modules:
+            for name, value in vars(module).items():
+                if not name.startswith("__") and name not in self.__dict__:
+                    object.__setattr__(self, name, value)
+
+    def __setattr__(self, name, value):
+        for module in self._modules:
+            if name in vars(module):
+                setattr(module, name, value)
+        object.__setattr__(self, name, value)
+
+    def __getattribute__(self, name):
+        # Always read the live value: code may have changed a module variable.
+        if not name.startswith("_"):
+            for module in object.__getattribute__(self, "_modules"):
+                if name in vars(module):
+                    return vars(module)[name]
+        return object.__getattribute__(self, name)
+
+    @property
+    def all_source_code(self):
+        """Source code of every module (for tests that inspect the code)."""
+        import inspect
+        return "\n".join(inspect.getsource(m) for m in self._modules)
+
+
+def _all_modules():
+    names = ["silenceplayer"] + [m.name for m in pkgutil.walk_packages(
+        silenceplayer.__path__, "silenceplayer.") if not m.name.endswith("__main__")]
+    return [importlib.import_module(n) for n in names]
+
+
+app_module = _Package(_all_modules())
 
 # The real function, kept before the offline fixture below replaces it.
 REAL_FETCH_LATEST_RELEASE = app_module.fetch_latest_release
