@@ -16,8 +16,6 @@ from .. import APP_VERSION
 from ..config import (
     SILENCE_MAX,
     SILENCE_MIN,
-    VOLUME_MAX,
-    VOLUME_MIN,
     ValidationError,
     _coerce_mirror_apps,
     enabled_mirror_apps,
@@ -41,7 +39,7 @@ from ..updates import RELEASES_URL, UpdateChecker, current_version
 
 
 class App:
-    WINDOW_W, WINDOW_H = 520, 800
+    WINDOW_W, WINDOW_H = 520, 770
     UI_POLL_MS = 50
 
     def __init__(self, root, instance=None, config_notice=None, config=None):
@@ -424,7 +422,7 @@ class App:
                                                 self.player.track_info(), self.config)
         items = [("Open Settings", self._show_window)]
         if now.kind in ("playing", "ducked", "paused"):
-            items.append(("Resume" if now.kind == "paused" else "Pause", self._np_toggle_play))
+            items.append(("Resume" if now.kind == "paused" else "Pause", self._np_toggle_pause))
         if self._update_info is not None:
             items.append((f"Download v{self._update_info.version}", self._open_update))
         items.append(("Stop Monitoring" if self.monitoring else "Start Monitoring",
@@ -741,24 +739,22 @@ class App:
         shared_card = tk.Frame(parent, bg=CARD, padx=16, pady=12)
         shared_card.pack(fill="x", padx=24, pady=4)
 
+        # The volume is set with the slider in the Now playing card.
         self.silence_var = tk.StringVar(value=str(self.config["silence_seconds"]))
-        self.vol_var     = tk.StringVar(value=str(self.config["max_volume"]))
-
-        label(shared_card, "Silence Timeout (seconds)", bold=True).grid(row=0, column=0, sticky="w")
-        label(shared_card, "Max Volume (0-100)",         bold=True).grid(row=0, column=1, sticky="w", padx=(20, 0))
-        self.silence_entry = entry(shared_card, self.silence_var, width=12)
-        self.silence_entry.grid(row=1, column=0, sticky="w", pady=(2, 8))
-        self.vol_entry = entry(shared_card, self.vol_var, width=12)
-        self.vol_entry.grid(row=1, column=1, sticky="w", padx=(20, 0), pady=(2, 8))
+        silence_row = tk.Frame(shared_card, bg=CARD)
+        silence_row.grid(row=0, column=0, columnspan=2, sticky="w")
+        label(silence_row, "Silence Timeout", bold=True, color=FG).pack(side="left", padx=(0, 12))
+        self.silence_entry = entry(silence_row, self.silence_var, width=6)
+        self.silence_entry.pack(side="left")
+        label(silence_row, "seconds", size=9, color=DIM).pack(side="left", padx=(8, 0))
 
         # Typed values are committed when the field loses focus or Enter is pressed
         # (and when the window is closed), so "settings save automatically" holds.
-        for widget in (self.silence_entry, self.vol_entry):
-            widget.bind("<FocusOut>", lambda e: self._commit_inputs_quietly())
-            widget.bind("<Return>",   lambda e: self._commit_inputs_quietly())
+        self.silence_entry.bind("<FocusOut>", lambda e: self._commit_inputs_quietly())
+        self.silence_entry.bind("<Return>",   lambda e: self._commit_inputs_quietly())
 
         fade_row = tk.Frame(shared_card, bg=CARD)
-        fade_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        fade_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 0))
         label(fade_row, "Fade-in / Fade-out", bold=True, color=FG).pack(side="left", padx=(0, 12))
 
         self.fade_enabled_var = tk.BooleanVar(value=self.config.get("fade_enabled", True))
@@ -873,40 +869,29 @@ class App:
         self._np_knob = self.np_bar.create_oval(0, 2, 10, 12, width=0, fill="#cdd6f4",
                                                 state="hidden")
         self._np_drag = None          # 0..1 while the bar is being dragged
+        self._np_hover = False
+        self.np_bar.bind("<Enter>", lambda e: self._np_set_hover(True))
+        self.np_bar.bind("<Leave>", lambda e: self._np_set_hover(False))
         self.np_bar.bind("<Configure>", lambda e: self._draw_np_bar())
         self.np_bar.bind("<ButtonPress-1>", self._np_drag_to)
         self.np_bar.bind("<B1-Motion>", self._np_drag_to)
         self.np_bar.bind("<ButtonRelease-1>", self._np_drop)
 
-        # Controls: back 10 s, play/pause, forward 10 s, volume (= Max Volume).
-        controls = tk.Frame(card, bg=CARD)
-        controls.pack(fill="x", padx=8, pady=(6, 0))
-
-        def control(text, command, width):
-            return tk.Button(controls, text=text, command=command, width=width,
-                             bg=BTN_BG, fg=FG, activebackground="#45475a",
-                             activeforeground=FG, relief="flat", bd=0,
-                             font=("Segoe UI Symbol", 10), cursor="hand2")
-
-        self.np_back_btn = control("\u27f2 10", lambda: self._np_skip(-10), 5)
-        self.np_back_btn.pack(side="left")
-        self.np_play_btn = control("\u25b6", self._np_toggle_play, 4)
-        self.np_play_btn.pack(side="left", padx=6)
-        self.np_fwd_btn = control("10 \u27f3", lambda: self._np_skip(10), 5)
-        self.np_fwd_btn.pack(side="left")
-
-        self.np_vol_label = tk.Label(controls, bg=CARD, fg=DIM, font=("Segoe UI", 9), width=4,
-                                     anchor="e")
+        # Volume (this is the Max Volume setting, saved with Save Settings).
+        vol_row = tk.Frame(card, bg=CARD)
+        vol_row.pack(fill="x", padx=8, pady=(8, 0))
+        tk.Label(vol_row, text="Volume", bg=CARD, fg=DIM,
+                 font=("Segoe UI", 9)).pack(side="left")
+        self.np_vol_label = tk.Label(vol_row, bg=CARD, fg=DIM, font=("Segoe UI", 9),
+                                     width=4, anchor="e")
         self.np_vol_label.pack(side="right")
         self.np_vol_var = tk.IntVar(value=int(self.config.get("max_volume", 50)))
-        self.np_vol = tk.Scale(controls, from_=0, to=100, orient="horizontal",
+        self.np_vol = tk.Scale(vol_row, from_=0, to=100, orient="horizontal",
                                variable=self.np_vol_var, command=self._np_volume_changed,
                                bg=CARD, fg=FG, troughcolor=BTN_BG, activebackground=ACC,
-                               highlightthickness=0, sliderrelief="flat", length=150,
-                               showvalue=False, sliderlength=14, width=10, bd=0)
-        self.np_vol.pack(side="right", padx=(4, 4))
-        tk.Label(controls, text="\U0001f50a", bg=CARD, fg=DIM,
-                 font=("Segoe UI Symbol", 10)).pack(side="right")
+                               highlightthickness=0, sliderrelief="flat", showvalue=False,
+                               sliderlength=14, width=8, bd=0, cursor="hand2")
+        self.np_vol.pack(side="left", fill="x", expand=True, padx=(10, 6))
         self.np_vol_label.config(text=f"{self.np_vol_var.get()}%")
 
     def _draw_np_bar(self):
@@ -920,12 +905,17 @@ class App:
         self.np_bar.coords(self._np_track, 0, 5, width, 9)
         self.np_bar.coords(self._np_fill, 0, 5, x, 9)
         self.np_bar.itemconfig(self._np_fill, fill=color)
-        show_knob = now is not None and now.progress is not None
+        show_knob = (now is not None and now.progress is not None
+                     and (self._np_hover or self._np_drag is not None))
         knob_x = min(max(x, 5), width - 5)
         self.np_bar.coords(self._np_knob, knob_x - 5, 2, knob_x + 5, 12)
         self.np_bar.itemconfig(self._np_knob, state="normal" if show_knob else "hidden")
 
     # ── playback controls ──
+
+    def _np_set_hover(self, on):
+        self._np_hover = on
+        self._draw_np_bar()
 
     def _np_track_length(self):
         info = self.player.track_info()
@@ -950,22 +940,10 @@ class App:
         self._refresh_now_playing_once()
         self._draw_np_bar()             # from the real position again
 
-    def _np_skip(self, seconds):
-        info = self.player.track_info()
-        if info is None or info.position is None:
-            return
-        self.player.seek(info.position + seconds)
-        self._refresh_now_playing_once()
-
-    def _np_toggle_play(self):
-        if not self.monitoring:
-            self.set_status("Start Monitoring first: Silence Player plays when the PC is quiet.")
-            return
+    def _np_toggle_pause(self):
+        """Pause/Resume from the tray menu."""
         if self.player.track_info() is not None:
             self.player.toggle_pause()
-        else:
-            self.monitor.play_now()
-            self.set_status("Starting the ambient sound...")
         self._refresh_now_playing_once()
 
     def _np_volume_changed(self, value):
@@ -976,8 +954,6 @@ class App:
         if self.config.get("max_volume") == v:
             return
         self.config["max_volume"] = v
-        self.vol_var.set(str(v))
-        self.vol_entry.config(fg=self._FG)
         self._apply_live_levels()
 
     def _apply_live_levels(self):
@@ -1020,7 +996,6 @@ class App:
         self.np_title.set_fg(title_fg)
         if self._np_drag is None:
             self.np_detail.config(text=now.detail)
-        self.np_play_btn.config(text="\u275a\u275a" if now.kind in ("playing", "ducked") else "\u25b6")
         self._draw_np_bar()
         if self._tray_menu is not None and self._tray_menu.is_open:
             self._tray_menu.update_header(now.menu_head, now.menu_line, now.kind)
@@ -1381,13 +1356,6 @@ class App:
         except ValidationError as e:
             errors.append(str(e))
             self.silence_entry.config(fg=self._ERR)
-        try:
-            self.config["max_volume"] = parse_int_field(
-                self.vol_var.get(), "Max Volume", VOLUME_MIN, VOLUME_MAX)
-            self.vol_entry.config(fg=self._FG)
-        except ValidationError as e:
-            errors.append(str(e))
-            self.vol_entry.config(fg=self._ERR)
 
         # File/folder paths are set by Browse (the fields only show names).
 
@@ -1399,20 +1367,13 @@ class App:
         return errors
 
     def _commit_inputs_quietly(self):
-        before = self.config.get("max_volume")
         errors = self._commit_inputs()
         if errors:
             self.set_status(errors[0])
-        if self.config.get("max_volume") != before:
-            self.np_vol_var.set(int(self.config["max_volume"]))
-            self.np_vol_label.config(text=f"{self.config['max_volume']}%")
-            self._apply_live_levels()
 
     def _revert_invalid_fields(self):
         self.silence_var.set(str(self.config["silence_seconds"]))
-        self.vol_var.set(str(self.config["max_volume"]))
         self.silence_entry.config(fg=self._FG)
-        self.vol_entry.config(fg=self._FG)
 
     # ── monitoring ──
 

@@ -39,9 +39,10 @@ def test_only_save_settings_writes_config(appmod, root, cfg_path, fast_timing,
     a = make_app(appmod, root)
     assert not cfg_path.exists()
     a.silence_var.set("45")
-    a.vol_var.set("60")
+    a.np_vol.set(60)                           # the volume slider
+    pump(root, 0.05)
     a._commit_inputs_quietly()                 # applies to the running app...
-    assert a.config["silence_seconds"] == 45
+    assert a.config["silence_seconds"] == 45 and a.config["max_volume"] == 60
     a._toggle_monitoring()                     # (fails: no file) – must not save either
     a._on_window_close()
     assert not cfg_path.exists(), "closing must not save"

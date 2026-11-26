@@ -63,7 +63,6 @@ class AudioMonitor:
         self._get_playing_apps = playing_apps_source or get_playing_apps
         self._clock = clock
         self.info = MonitorInfo("starting")
-        self._play_now = threading.Event()
 
     @property
     def running(self):
@@ -119,7 +118,6 @@ class AudioMonitor:
             return
         log.info("Monitoring started")
         self.info = MonitorInfo("starting")
-        self._play_now.clear()
         state = _MonitorState()
         self.app.set_status("Monitoring... waiting for silence.")
         while not stop_event.wait(self.POLL_INTERVAL):
@@ -183,11 +181,6 @@ class AudioMonitor:
                      ", ".join(suspects))
             self.app.on_suspected_mirror(suspects)
 
-    def play_now(self):
-        """Start the ambient sound on the next check, without waiting for
-        silence (the Play button). Ignored while it's already playing."""
-        self._play_now.set()
-
     def _start_ambient(self, s, settings, now, stop_event):
         app, player = self.app, self.app.player
         if app.play_ambient():
@@ -222,7 +215,6 @@ class AudioMonitor:
         apps = tuple(sorted(current_apps))
 
         if s.ambient_triggered:
-            self._play_now.clear()          # already playing
             if now < s.cooldown_until:
                 self.info = MonitorInfo("playing")
                 app.set_status("Playing ambient sound...")
@@ -282,11 +274,7 @@ class AudioMonitor:
                     self.info = MonitorInfo("playing")
                     app.set_status("Playing ambient sound...")
         else:
-            if self._play_now.is_set():
-                self._play_now.clear()
-                log.info("Play pressed; starting ambient now")
-                self._start_ambient(s, settings, now, stop_event)
-            elif current_apps:
+            if current_apps:
                 s.silence_start = None
                 self.info = MonitorInfo("audio", apps=apps)
                 app.set_status(f"Audio playing ({names}). Monitoring...")

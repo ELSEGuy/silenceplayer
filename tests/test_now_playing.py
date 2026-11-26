@@ -361,45 +361,44 @@ def _card_app(appmod, root, monkeypatch, track):
     return a, ctl, calls
 
 
-def test_card_controls(appmod, root, cfg_path, fast_timing, monkeypatch):
+def test_seek_bar(appmod, root, cfg_path, fast_timing, monkeypatch):
     a, ctl, calls = _card_app(appmod, root, monkeypatch, appmod.TrackInfo(FILE, 60, 600))
-    assert a.np_play_btn.cget("text") == "\u275a\u275a"
-    a.np_play_btn.invoke()
-    a.np_fwd_btn.invoke()
-    a.np_back_btn.invoke()
-    assert calls == ["toggle", ("seek", 70), ("seek", 50)]
-
-    ctl.track = appmod.TrackInfo(FILE, 60, 600, paused=True)
-    pump(root, 0.1)
-    assert a.np_badge.cget("text") == "Paused"
-    assert a.np_play_btn.cget("text") == "▶"
+    a.np_bar.update_idletasks()
+    assert a.np_bar.itemcget(a._np_knob, "state") == "hidden", "knob only on hover"
+    a.np_bar.event_generate("<Enter>")
+    assert a.np_bar.itemcget(a._np_knob, "state") == "normal"
+    a.np_bar.event_generate("<Leave>")
+    assert a.np_bar.itemcget(a._np_knob, "state") == "hidden"
 
     # click a quarter of the way along the bar → 150 s of the 600 s track
-    calls.clear()
-    a.np_bar.update_idletasks()
     w = a.np_bar.winfo_width()
     a.np_bar.event_generate("<ButtonPress-1>", x=w // 4, y=5)
+    assert a.np_bar.itemcget(a._np_knob, "state") == "normal"
     a.np_bar.event_generate("<ButtonRelease-1>", x=w // 4, y=5)
     pump(root, 0.05)
     assert len(calls) == 1 and calls[0][0] == "seek"
     assert calls[0][1] == pytest.approx(150, abs=3)
+
+    ctl.track = appmod.TrackInfo(FILE, 60, 600, paused=True)
+    pump(root, 0.1)
+    assert a.np_badge.cget("text") == "Paused"
     a.monitor.stop(wait=True)
 
 
-def test_play_button_when_nothing_is_playing(appmod, root, cfg_path, fast_timing,
-                                             monkeypatch):
-    a, ctl, calls = _card_app(appmod, root, monkeypatch, None)
-    a.monitor.info = appmod.MonitorInfo("waiting", remaining=20)
-    asked = []
-    monkeypatch.setattr(a.monitor, "play_now", lambda: asked.append(True))
-    a.np_play_btn.invoke()
-    assert asked == [True] and calls == []
+def test_tray_pause_and_resume(appmod, root, cfg_path, fast_timing, monkeypatch):
+    a, ctl, calls = _card_app(appmod, root, monkeypatch, appmod.TrackInfo(FILE, 60, 600))
+    a._np_toggle_pause()
+    assert calls == ["toggle"]
+    ctl.track = None                      # nothing playing: nothing to pause
+    a._np_toggle_pause()
+    assert calls == ["toggle"]
+    a.monitor.stop(wait=True)
 
-    a.monitoring = False
-    a.np_play_btn.invoke()
-    pump(root, 0.05)
-    assert asked == [True]
-    assert "Start Monitoring" in a.status_var.get()
+
+def test_no_max_volume_field(appmod, root, cfg_path, fast_timing):
+    a = make_app(appmod, root)
+    assert not hasattr(a, "vol_var") and not hasattr(a, "vol_entry")
+    assert not hasattr(a, "np_play_btn")
     a.monitor.stop(wait=True)
 
 
@@ -408,7 +407,7 @@ def test_volume_and_duck_apply_live(appmod, root, cfg_path, fast_timing, monkeyp
     a.config["duck_percent"] = 50
     a.np_vol.set(40)
     pump(root, 0.05)
-    assert a.config["max_volume"] == 40 and a.vol_var.get() == "40"
+    assert a.config["max_volume"] == 40 and a.np_vol_label.cget("text") == "40%"
     assert calls[-1] == ("level", 40)
 
     a.monitor.info = appmod.MonitorInfo("ducked", apps=("discord.exe",), duck_percent=50)
@@ -417,9 +416,8 @@ def test_volume_and_duck_apply_live(appmod, root, cfg_path, fast_timing, monkeyp
     assert a.config["duck_percent"] == 25
     assert calls[-1] == ("level", 10)     # 25% of 40
 
-    a.vol_var.set("80")                   # typed in the Max Volume field
-    a._commit_inputs_quietly()
-    assert a.np_vol_var.get() == 80
+    a.np_vol.set(80)
+    pump(root, 0.05)
     assert calls[-1] == ("level", 20)     # still ducked: 25% of 80
     assert not cfg_path.exists(), "live changes are not saved until Save Settings"
     a.monitor.stop(wait=True)

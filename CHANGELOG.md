@@ -8,16 +8,16 @@
   ducked (and for which app), waiting for silence (with the countdown), or
   off. Hovering the tray icon shows the same in its tooltip. The window is a
   little taller to make room.
-- **Playback controls.** The Now playing card has play/pause, back and
-  forward 10 seconds, a progress bar you can click or drag to jump through the
-  track, and a volume slider (the same setting as Max Volume). Play while
-  waiting for silence starts the sound right away. Pause fades out quickly and
-  holds the track until you press play again; the tray menu has Pause/Resume
-  too.
-- **Live volume.** Changing Max Volume or the "When External Audio Detected"
-  level now applies to the sound at once, whether it is playing, ducked or
-  paused (paused sound resumes at the new level). As before, Save Settings
-  keeps the change.
+- **Seek and volume in Now playing.** Click or drag the progress bar to jump
+  through the track. The volume slider under it replaces the Max Volume field
+  and changes the sound right away. Silence Timeout now sits on one row like
+  the other settings.
+- **Pause from the tray.** Right-click the tray icon for Pause/Resume while a
+  sound is playing. Pause fades out quickly and holds your place.
+- **Live levels.** The volume slider and the "When External Audio Detected"
+  level apply to the sound at once, whether it is playing, ducked or paused
+  (paused sound resumes at the new level). As before, Save Settings keeps the
+  change.
 - **New tray menu.** Right-clicking the tray icon opens a dark menu in Silence
   Player's own style, headed by what's playing (green), ducked (yellow) or
   waiting for silence, and updating live while it's open. Rounded corners on
