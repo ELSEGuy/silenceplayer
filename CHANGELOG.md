@@ -13,6 +13,10 @@
   through the track. The volume slider under it replaces the Max Volume field
   and changes the sound right away. Silence Timeout now sits on one row like
   the other settings.
+- **Change the sound while it plays (Single File).** Picking another file
+  with Browse while the ambient sound is playing or ducked fades the current
+  file out and the new one in (1 second each way, or instantly with fades
+  off), at the same level. While paused, the new file waits paused.
 - **Pause from the tray.** Right-click the tray icon for Pause/Resume while a
   sound is playing. Pause fades out quickly and holds your place.
 - **Live levels.** The volume slider and the "When External Audio Detected"

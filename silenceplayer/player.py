@@ -123,7 +123,8 @@ class _PlaybackSession:
         self.current_index = 0
         self.pending_pos = 0.0                # start position of the track being loaded
         self.error = None
-        self.paused = False                   # paused by the user (Now playing card)
+        self.paused = False                   # paused by the user (tray menu)
+        self.switch_to = None                 # single mode: file picked while playing
 
 
 class AmbientPlayer:
@@ -291,6 +292,28 @@ class AmbientPlayer:
                 self._target_vol = max(0, min(100, target_vol))
                 return
         self._start_level_ramp(target_vol, self.LEVEL_SECONDS, 5, "level")
+
+    SWITCH_FADE_SECONDS = 1.0   # fade out, then in, when the file is changed
+
+    def switch_single(self, path):
+        """Single File mode: the user picked another file while the sound is
+        playing, ducked or paused. The current file fades out and the new one
+        fades in to the level in use (paused stays paused). Returns True if a
+        switch was started."""
+        with self._lock:
+            s = self._session
+            if (s is None or s.mode != "single" or s.finished
+                    or s.stop_event.is_set() or self._closed):
+                return False
+            if path == (s.switch_to or s.current_path):
+                return False
+            s.switch_to = path
+            s.source = path          # the resume point now belongs to this file
+        log.info("Switching ambient file to %s", os.path.basename(path))
+        return True
+
+    def _switch_fade_secs(self):
+        return min(self._get_fade_secs(), self.SWITCH_FADE_SECONDS)
 
     @property
     def resume_state(self):
@@ -604,7 +627,7 @@ class AmbientPlayer:
                  self.AUDIO_START_TIMEOUT)
         return True
 
-    def _start_track(self, s, path, start_pos, index, fade):
+    def _start_track(self, s, path, start_pos, index, fade, fade_secs=None):
         with self._lock:
             if s.stop_event.is_set():
                 return False
@@ -624,14 +647,60 @@ class AmbientPlayer:
                 return True
             gen = self._new_ramp()
             target = self._target_vol
-        self._ramp(gen, target, self._get_fade_secs(), self.FADE_STEPS,
-                   abort_event=s.stop_event, start=0)
+        self._ramp(gen, target, self._get_fade_secs() if fade_secs is None else fade_secs,
+                   self.FADE_STEPS, abort_event=s.stop_event, start=0)
         return not s.stop_event.is_set()
 
     def _wait_for_track_end(self, s):
         # A paused track is not finished: VLC reports "not playing" while paused.
-        while not s.stop_event.is_set() and (self._is_playing() or s.paused):
-            s.stop_event.wait(self.POLL_SECONDS)
+        # Also returns when the user picks another file (switch_single).
+        while (not s.stop_event.is_set() and s.switch_to is None
+               and (self._is_playing() or s.paused)):
+            s.stop_event.wait(self.SWITCH_POLL_SECONDS if s.paused else self.POLL_SECONDS)
+
+    SWITCH_POLL_SECONDS = 0.1
+
+    def _switch_track(self, s, path):
+        """Fade the current file out and start `path` (see switch_single)."""
+        secs = self._switch_fade_secs()
+        for _ in range(5):
+            with self._lock:
+                if s.paused or not s.track_started.is_set():
+                    break
+                gen = self._new_ramp()
+            # A duck or a volume change during the fade takes over the ramp:
+            # take it back and keep fading out (the new level is kept for later).
+            if self._ramp(gen, 0, secs, 20, abort_event=s.stop_event):
+                break
+            if s.stop_event.is_set():
+                break
+        if s.stop_event.is_set():
+            return True              # stopped meanwhile: the session ends normally
+        with self._lock:
+            paused = s.paused        # the user may have paused during the fade
+        if paused:
+            return self._start_paused_track(s, path)
+        return self._start_track(s, path, 0.0, 0, fade=True, fade_secs=secs)
+
+    def _start_paused_track(self, s, path):
+        """Load `path` silently and leave it paused at the start; resume() plays it."""
+        with self._lock:
+            s.track_started.clear()
+            s.current_path, s.current_index, s.pending_pos = path, 0, 0.0
+            self._new_ramp()
+            self._set_volume(0)
+        if not self._load_and_play(s, path, 0.0, wait_for_audio=False):
+            return False
+        with self._lock:
+            if s.stop_event.is_set():
+                return False
+            try:
+                self.media_player.set_pause(1)
+            except Exception:
+                log.warning("VLC pause failed", exc_info=True)
+            # (resume() is ignored until track_started is set, so still paused)
+            s.track_started.set()
+        return True
 
     def _run_single(self, s, path, max_vol, loop_mode):
         with self._lock:
@@ -643,7 +712,19 @@ class AmbientPlayer:
             return
         while not s.stop_event.is_set():
             self._wait_for_track_end(s)
-            if s.stop_event.is_set() or loop_mode != "loop":
+            if s.stop_event.is_set():
+                return
+            with self._lock:
+                new_path, s.switch_to = s.switch_to, None
+            if new_path is not None:
+                path = new_path
+                if not self._switch_track(s, path):
+                    if not s.stop_event.is_set():
+                        s.error = f"Could not play {os.path.basename(path)}."
+                        self.app.set_status(s.error)
+                    return
+                continue
+            if loop_mode != "loop":
                 return
             if not self._start_track(s, path, 0.0, 0, fade=False):
                 if not s.stop_event.is_set():

@@ -1342,6 +1342,9 @@ class App:
         if path:
             self.config["mp3_path"] = path
             self._refresh_path_fields()
+            # Single File mode: the sound that is playing changes over now.
+            if self.mode_var.get() == "single" and self.player.switch_single(path):
+                self.set_status(f"Switching to {display_name(path)}...")
 
     def _browse_playlist(self):
         folder = filedialog.askdirectory(title="Select folder with audio files")

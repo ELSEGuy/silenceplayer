@@ -482,3 +482,22 @@ def test_volume_never_goes_to_zero(appmod, root, cfg_path, fast_timing):
     pump(root, 0.05)
     assert a.config["max_volume"] == 5 and a.np_vol.get() == 5
     a.monitor.stop(wait=True)
+
+
+def test_browse_switches_the_playing_file_in_single_mode(appmod, root, cfg_path,
+                                                         fast_timing, monkeypatch):
+    a = make_app(appmod, root)
+    switched = []
+    monkeypatch.setattr(a.player, "switch_single", lambda p: switched.append(p) or True)
+    monkeypatch.setattr(appmod.filedialog, "askopenfilename", lambda **k: "C:/Music/waves.opus")
+    a.mode_var.set("single")
+    a._browse_mp3()
+    pump(root, 0.05)
+    assert switched == ["C:/Music/waves.opus"]
+    assert a.config["mp3_path"] == "C:/Music/waves.opus"
+    assert a.status_var.get() == "Switching to waves.opus..."
+
+    a.mode_var.set("playlist")             # only Single File mode switches
+    a._browse_mp3()
+    assert switched == ["C:/Music/waves.opus"]
+    a.monitor.stop(wait=True)

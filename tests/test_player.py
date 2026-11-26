@@ -1,7 +1,8 @@
 import os
 import time
 
-from conftest import wait_until
+import pytest
+from conftest import State, wait_until
 
 
 def _wait_loaded(mp, n, player=None):
@@ -511,3 +512,119 @@ def test_set_level_while_paused_applies_on_resume(player_factory, make_config,
     player.resume()
     assert wait_until(lambda: mp.volume == 15)
     player.stop(wait=True, timeout=3)
+
+
+# ── single mode: changing the file while it plays ────────────────────────────
+
+def _single_two_files(player_factory, make_config, audio_files, **cfg):
+    folder, (rain, waves) = audio_files("rain.mp3", "waves.opus")
+    c = make_config(mode="single", mp3_path=rain, fade_enabled=True, **cfg)
+    app, player, mp = player_factory(c)
+    player.play(c)
+    _wait_loaded(mp, 1, player)
+    return c, player, mp, rain, waves
+
+
+def test_switch_while_playing_fades_to_the_new_file(player_factory, make_config,
+                                                    audio_files, fast_timing):
+    c, player, mp, rain, waves = _single_two_files(player_factory, make_config,
+                                                   audio_files, max_volume=80)
+    assert wait_until(lambda: mp.volume == 80)
+    assert player.switch_single(waves)
+    _wait_loaded(mp, 2, player)
+    assert mp.loads == [rain, waves]
+    assert ("stop",) not in mp.events, "the session keeps going: no stop between files"
+    assert 0 in mp.volumes[mp.volumes.index(80):], "faded out before switching"
+    assert wait_until(lambda: mp.volume == 80), "faded back in to the same level"
+    assert player.track_info().path == waves
+    assert player.playing
+    player.stop(wait=True, timeout=3)
+
+
+def test_switch_while_ducked_keeps_the_duck(player_factory, make_config, audio_files,
+                                            fast_timing):
+    c, player, mp, rain, waves = _single_two_files(player_factory, make_config,
+                                                   audio_files, max_volume=80)
+    player.duck(20)
+    assert wait_until(lambda: mp.volume == 20)
+    player.switch_single(waves)
+    _wait_loaded(mp, 2, player)
+    assert wait_until(lambda: mp.volume == 20)
+    time.sleep(0.2)
+    assert mp.volume == 20, "the new file must come in at the ducked level"
+    player.unduck(80)
+    assert wait_until(lambda: mp.volume == 80)
+    player.stop(wait=True, timeout=3)
+
+
+def test_switch_while_paused_stays_paused(player_factory, make_config, audio_files,
+                                          fast_timing):
+    c, player, mp, rain, waves = _single_two_files(player_factory, make_config,
+                                                   audio_files, max_volume=80)
+    player.pause()
+    assert wait_until(lambda: ("pause", True) in mp.events)
+    player.switch_single(waves)
+    assert wait_until(lambda: mp.loads == [rain, waves]
+                      and player._session.track_started.is_set())
+    assert wait_until(lambda: mp.state == State.Paused)
+    assert player.paused and player.track_info().path == waves
+    assert player.track_info().paused
+    assert mp.volume == 0
+    assert player.resume()
+    assert wait_until(lambda: mp.volume == 80)
+    assert mp.is_playing()
+    player.stop(wait=True, timeout=3)
+
+
+def test_switch_is_ignored_when_it_does_not_apply(player_factory, make_config,
+                                                  audio_files, fast_timing):
+    folder, (rain, waves) = audio_files("rain.mp3", "waves.opus")
+    c = make_config(mode="single", mp3_path=rain, fade_enabled=False)
+    app, player, mp = player_factory(c)
+    assert not player.switch_single(waves), "nothing playing"
+    player.play(c)
+    _wait_loaded(mp, 1, player)
+    assert not player.switch_single(rain), "same file"
+    player.stop(wait=True, timeout=3)
+
+    pl = make_config(mode="playlist", playlist_folder=folder, fade_enabled=False)
+    app, player, mp = player_factory(pl)
+    player.play(pl)
+    _wait_loaded(mp, 1, player)
+    assert not player.switch_single(waves), "playlist mode is left alone"
+    player.stop(wait=True, timeout=3)
+
+
+def test_switch_then_stop_resumes_the_new_file(player_factory, make_config, audio_files,
+                                               fast_timing):
+    c, player, mp, rain, waves = _single_two_files(player_factory, make_config,
+                                                   audio_files)
+    player.switch_single(waves)
+    _wait_loaded(mp, 2, player)
+    mp.position_ms = 42_000
+    player.stop(wait=True, timeout=3)
+    state = player.resume_state
+    assert state.path == waves and state.source == waves
+    assert state.position == pytest.approx(42)
+
+
+def test_loop_after_switch_repeats_the_new_file(player_factory, make_config, audio_files,
+                                                fast_timing):
+    c, player, mp, rain, waves = _single_two_files(player_factory, make_config,
+                                                   audio_files, single_loop_mode="loop")
+    player.switch_single(waves)
+    _wait_loaded(mp, 2, player)
+    mp.finish()
+    _wait_loaded(mp, 3, player)
+    assert mp.loads == [rain, waves, waves]
+    player.stop(wait=True, timeout=3)
+
+
+def test_switch_to_a_missing_file_stops_with_a_message(player_factory, make_config,
+                                                       audio_files, fast_timing):
+    c, player, mp, rain, waves = _single_two_files(player_factory, make_config,
+                                                   audio_files)
+    os.remove(waves)
+    player.switch_single(waves)
+    _wait_finished(player)
+    assert "waves.opus" in (player.last_error or "")
