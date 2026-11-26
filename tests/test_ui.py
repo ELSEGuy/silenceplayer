@@ -303,3 +303,47 @@ def test_start_with_windows_unavailable_off_windows(appmod, root, cfg_path, monk
     a._toggle_startup_choice()
     assert not a.startup_var.get()
     a.monitor.stop(wait=True)
+
+
+def test_playlist_is_locked_while_monitoring(appmod, root, cfg_path, tmp_path,
+                                             monkeypatch, fast_timing):
+    folder = tmp_path / "ambient"
+    folder.mkdir()
+    (folder / "rain.mp3").write_bytes(b"")
+    cfg_path.write_text(json.dumps({"mode": "playlist", "playlist_folder": str(folder)}))
+    a = make_app(appmod, root)
+    asked = []
+    monkeypatch.setattr(appmod.filedialog, "askdirectory",
+                        lambda **k: asked.append(True) or "C:/Other")
+
+    # a playable playlist starts monitoring at launch, so it's locked from the start
+    assert a.monitoring
+    assert a.playlist_browse_btn.cget("state") == "disabled"
+    a._browse_playlist()                         # also what clicking the folder name does
+    pump(root, 0.05)
+    assert asked == [] and a.config["playlist_folder"] == str(folder)
+    assert a.status_var.get() == "Stop Monitoring to change the playlist."
+
+    a.set_status("")
+    pump(root, 0.05)
+    a.playlist_browse_btn.event_generate("<Button-1>")   # the greyed-out button
+    pump(root, 0.05)
+    assert a.status_var.get() == "Stop Monitoring to change the playlist."
+    assert asked == []
+
+    a._toggle_monitoring()                       # Stop Monitoring
+    assert not a.monitoring
+    assert a.playlist_browse_btn.cget("state") == "normal"
+    a._browse_playlist()
+    assert asked == [True] and a.config["playlist_folder"] == "C:/Other"
+
+    a.config["playlist_folder"] = str(folder)
+    a._toggle_monitoring()                       # Start Monitoring again
+    assert a.monitoring
+    assert a.playlist_browse_btn.cget("state") == "disabled"
+
+    # monitoring that stops by itself unlocks it too
+    a.monitor.stop(wait=True)
+    a._handle_auto_stop("stopped")
+    assert a.playlist_browse_btn.cget("state") == "normal"
+    a.player.stop(wait=True, timeout=3)

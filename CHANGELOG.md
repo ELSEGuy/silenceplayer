@@ -17,6 +17,9 @@
   with Browse while the ambient sound is playing or ducked fades the current
   file out and the new one in (1 second each way, or instantly with fades
   off), at the same level. While paused, the new file waits paused.
+- **Playlist locked while monitoring.** The playlist folder can't be changed
+  while monitoring is on (Browse is greyed out); stop monitoring to pick
+  another folder.
 - **Pause from the tray.** Right-click the tray icon for Pause/Resume while a
   sound is playing. Pause fades out quickly and holds your place.
 - **Live levels.** The volume slider and the "When External Audio Detected"

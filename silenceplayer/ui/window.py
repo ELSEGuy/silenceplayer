@@ -715,7 +715,12 @@ class App:
         self.playlist_entry = self._path_field(playlist_card, self.playlist_var,
                                                self._browse_playlist, BTN_BG, FG)
         self.playlist_entry.grid(row=1, column=0, sticky="w")
-        button(playlist_card, "Browse", self._browse_playlist).grid(row=1, column=1, padx=(6, 10))
+        self.playlist_browse_btn = button(playlist_card, "Browse", self._browse_playlist)
+        self.playlist_browse_btn.config(disabledforeground="#585b70")
+        self.playlist_browse_btn.grid(row=1, column=1, padx=(6, 10))
+        # A disabled button ignores its command but still sees the click:
+        # say why it's greyed out.
+        self.playlist_browse_btn.bind("<Button-1>", self._playlist_locked_hint, add="+")
 
         self.playlist_loop_var = tk.StringVar(value=self.config.get("playlist_loop_mode", "loop_playlist"))
         playlist_toggle_frame = tk.Frame(playlist_card, bg=CARD)
@@ -1346,7 +1351,17 @@ class App:
             if self.mode_var.get() == "single" and self.player.switch_single(path):
                 self.set_status(f"Switching to {display_name(path)}...")
 
+    PLAYLIST_LOCKED = "Stop Monitoring to change the playlist."
+
+    def _playlist_locked_hint(self, event=None):
+        if self.monitoring:
+            self.set_status(self.PLAYLIST_LOCKED)
+
     def _browse_playlist(self):
+        # The playlist can't change under a running monitor: stop it first.
+        if self.monitoring:
+            self._playlist_locked_hint()
+            return
         folder = filedialog.askdirectory(title="Select folder with audio files")
         if folder:
             self.config["playlist_folder"] = folder
@@ -1402,6 +1417,8 @@ class App:
             self.start_btn.config(text="Stop Monitoring", fg="#f38ba8")
         else:
             self.start_btn.config(text="Start Monitoring", fg="#a6e3a1")
+        self.playlist_browse_btn.config(state="disabled" if on else "normal",
+                                        cursor="arrow" if on else "hand2")
         self._refresh_tray_menu()
 
     def _start_monitoring(self):
