@@ -190,34 +190,62 @@ def test_bad_config_value_does_not_kill_worker(appmod, make_config, fast_timing)
     mon.stop(wait=True)
 
 
+class FakeSession:
+    """What list_sessions() returns: a pid and a control with a peak meter."""
+
+    def __init__(self, pid, peak):
+        self.ProcessId = pid
+        self._ctl = self
+
+    def QueryInterface(self, iface):
+        return self
+
+    def GetPeakValue(self):
+        return self.peak
+
+
+def fake_sessions(monkeypatch, appmod, rows):
+    """rows: (pid, name, peak). Patches list_sessions and the name lookup."""
+    sessions = []
+    names = {}
+    for pid, name, peak in rows:
+        sess = FakeSession(pid, peak)
+        sess.peak = peak
+        sessions.append(sess)
+        names[pid] = name
+    monkeypatch.setattr(appmod, "list_sessions", lambda: list(sessions))
+    monkeypatch.setattr(appmod, "process_names", appmod.ProcessNames(lookup=names.__getitem__))
+    return sessions
+
+
 def test_get_playing_apps_ignores_own_process_by_pid(appmod, monkeypatch):
     import os
-
-    class Proc:
-        def __init__(self, pid, name):
-            self.pid, self._name = pid, name
-
-        def name(self):
-            return self._name
-
-    class Meter:
-        def GetPeakValue(self):
-            return 0.5
-
-    class Ctl:
-        def QueryInterface(self, iface):
-            return Meter()
-
-    class Session:
-        def __init__(self, pid, name):
-            self.Process, self._ctl = Proc(pid, name), Ctl()
-
-    monkeypatch.setattr(appmod.AudioUtilities, "sessions", [
-        Session(os.getpid(), "pythonw3.12.exe"),     # ourselves, unusual name
-        Session(os.getpid() + 1, "spotify.exe"),
-        Session(os.getpid() + 2, "discord.exe"),
-    ], raising=False)
+    base = os.getpid()
+    fake_sessions(monkeypatch, appmod, [
+        (base, "pythonw3.12.exe", 0.5),      # ourselves, unusual name
+        (base + 1, "spotify.exe", 0.5),
+        (base + 2, "discord.exe", 0.5),
+        (0, "system", 0.9),                  # Windows system sounds (pid 0) are ignored
+    ])
     assert appmod.get_playing_apps(["discord.exe"]) == {"spotify.exe"}
+
+
+def test_quiet_sessions_and_unknown_processes_are_ignored(appmod, monkeypatch):
+    import os
+    base = os.getpid()
+    sessions = fake_sessions(monkeypatch, appmod, [
+        (base + 1, "spotify.exe", 0.0005),   # below the 0.001 peak threshold
+        (base + 2, "zen.exe", 0.2),
+    ])
+    sessions.append(FakeSession(base + 3, 0.5))   # process exited: name lookup fails
+    sessions[-1].peak = 0.5
+    assert appmod.get_playing_apps([]) == {"zen.exe"}
+
+
+def test_get_app_pids_finds_every_session_of_an_app(appmod, monkeypatch):
+    fake_sessions(monkeypatch, appmod, [
+        (11, "discord.exe", 0.0), (12, "discord.exe", 0.3), (13, "zen.exe", 0.3), (0, "x", 0)])
+    assert appmod.get_app_pids({"discord.exe"}) == {11: "discord.exe", 12: "discord.exe"}
 
 
 # ── Mirroring Fix in the monitor ─────────────────────────────────────────────
@@ -403,38 +431,12 @@ def test_mirror_filter_stays_on_while_ambient_fades_out(appmod, make_config):
 
 def test_get_playing_apps_reports_audible_excluded_apps(appmod, monkeypatch):
     import os
-
-    class Proc:
-        def __init__(self, pid, name):
-            self.pid, self._name = pid, name
-
-        def name(self):
-            return self._name
-
-    class Meter:
-        def __init__(self, peak):
-            self.peak = peak
-
-        def GetPeakValue(self):
-            return self.peak
-
-    class Ctl:
-        def __init__(self, peak):
-            self.peak = peak
-
-        def QueryInterface(self, iface):
-            return Meter(self.peak)
-
-    class Session:
-        def __init__(self, pid, name, peak):
-            self.Process, self._ctl = Proc(pid, name), Ctl(peak)
-
     base = os.getpid()
-    monkeypatch.setattr(appmod.AudioUtilities, "sessions", [
-        Session(base + 1, "spotify.exe", 0.5),       # excluded and audible
-        Session(base + 2, "vlc.exe", 0.0),           # excluded, silent
-        Session(base + 3, "discord.exe", 0.4),
-    ], raising=False)
+    fake_sessions(monkeypatch, appmod, [
+        (base + 1, "spotify.exe", 0.5),      # excluded and audible
+        (base + 2, "vlc.exe", 0.0),          # excluded, silent
+        (base + 3, "discord.exe", 0.4),
+    ])
     result = appmod.get_playing_apps(["spotify.exe", "vlc.exe"])
     assert result == {"discord.exe"}
     assert result.excluded_audible == {"spotify.exe"}

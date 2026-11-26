@@ -369,9 +369,9 @@ def test_fades_use_windows_mixer_volume_when_available(player_factory, make_conf
     fade turns into jumps. Fades go to the Windows mixer session instead."""
     import os
     control = FakeSimpleVolume()
-    monkeypatch.setattr(appmod.AudioUtilities, "sessions",
-                        [FakeSession(os.getpid() + 1, FakeSimpleVolume()),
-                         FakeSession(os.getpid(), control)], raising=False)
+    sessions = [FakeSession(os.getpid() + 1, FakeSimpleVolume()),
+                FakeSession(os.getpid(), control)]
+    monkeypatch.setattr(appmod, "list_sessions", lambda: list(sessions))
     folder, (song,) = audio_files("office.opus")
     cfg = make_config(mode="single", mp3_path=song, fade_enabled=True, max_volume=80)
     app, player, mp = player_factory(cfg)
