@@ -30,6 +30,7 @@
 - 🚫 Exclude specific applications from audio detection
 - 💬 Mirroring Fix for Discord, SignalRGB, Wallpaper Engine and more
 - 🖥️ Runs quietly in the Windows system tray, and can start with Windows
+- 🔔 Tells you when a new version is out
 - 💾 Saves your settings when you click Save Settings
 - 🎧 Supports MP3, M4A, OPUS, FLAC and MP4
 
@@ -103,6 +104,11 @@ The current version will remain available while 2.0 is being developed.
   this file is the most useful thing to attach to an issue.
 - Only one Silence Player runs at a time. Launching it again opens the Settings
   window of the copy that is already running.
+- The update check asks GitHub (`api.github.com`) which release is the newest. Nothing
+  about you or your PC is sent. A version you skip is remembered in
+  `%LOCALAPPDATA%\SilencePlayer\update.json`. To try the notice, start Silence Player
+  with the environment variable `SILENCEPLAYER_PRETEND_VERSION` set to an older
+  version, e.g. `1.2.0`.
 
 ## 🛠️ Building from source
 

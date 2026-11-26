@@ -3,6 +3,12 @@
 ## v1.4.0 (in progress)
 
 ### Added
+- **Update notice.** Silence Player checks GitHub for a newer stable release
+  shortly after it starts and every 6 hours. When there is one, a bar offers
+  **Download** (opens the release page), **Skip this version** or **Later**, and
+  the tray menu gets a "Download" entry. Pre-releases are never offered. You
+  can switch the check off, or check right away, under **Advanced > Check for
+  updates**. Nothing is downloaded or installed by itself.
 - **Start with Windows.** A new switch on the Player tab. When it's on,
   Silence Player starts when you sign in to Windows, goes straight to the tray
   and begins monitoring. Like every other setting it is applied when you click

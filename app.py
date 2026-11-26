@@ -13,6 +13,8 @@ import logging
 import queue
 import tempfile
 import copy
+import re
+import webbrowser
 from logging.handlers import RotatingFileHandler
 from typing import NamedTuple
 
@@ -231,6 +233,7 @@ DEFAULT_CONFIG = {
     "mirror_fix_enabled": True,
     "mirror_apps": [{"name": n, "enabled": True} for group in MIRROR_DEFAULTS for n in group],
     "mirror_defaults_version": MIRROR_DEFAULTS_VERSION,
+    "check_updates": True,
 }
 
 
@@ -366,6 +369,7 @@ _CONFIG_CHECKS = {
     "mirror_fix_enabled": _coerce_bool,
     "mirror_apps":        _coerce_mirror_apps,
     "mirror_defaults_version": lambda v: _coerce_int(v, 0, 10_000),
+    "check_updates":      _coerce_bool,
 }
 
 
@@ -945,6 +949,190 @@ class StartupEntry:
         self._reg.set(self.RUN_KEY, self.VALUE_NAME, wanted)
         log.info("Start with Windows: updated the path (%s → %s)", registered, wanted)
         return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Update check
+# ─────────────────────────────────────────────────────────────────────────────
+
+GITHUB_REPO    = "ELSEGuy/silenceplayer"
+UPDATE_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+RELEASES_URL   = f"https://github.com/{GITHUB_REPO}/releases/latest"
+# For testing the notice: run with this set to an older version (e.g. 1.2.0).
+PRETEND_VERSION_ENV = "SILENCEPLAYER_PRETEND_VERSION"
+
+_VERSION_RE = re.compile(r"^\s*v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(.*)$", re.IGNORECASE)
+
+
+def parse_version(text):
+    """'v1.3.0' → ((1, 3, 0), True). The flag is False for anything with a suffix
+    ('1.4.0-dev', 'v1.3-beta'): those are not stable releases. None if unreadable."""
+    m = _VERSION_RE.match(text or "") if isinstance(text, str) else None
+    if not m:
+        return None
+    nums = tuple(int(g) if g else 0 for g in m.groups()[:3])
+    return nums, m.group(4).strip() == ""
+
+
+def is_newer_release(tag, current):
+    """True if `tag` is a stable release newer than the running `current` version.
+    A test build like 1.4.0-dev counts as older than the 1.4.0 release."""
+    latest, cur = parse_version(tag), parse_version(current)
+    if latest is None or cur is None or not latest[1]:
+        return False
+    return latest[0] + (1,) > cur[0] + (1 if cur[1] else 0,)
+
+
+def current_version():
+    """APP_VERSION, unless a pretend version is set for testing the update notice."""
+    return os.environ.get(PRETEND_VERSION_ENV, "").strip() or APP_VERSION
+
+
+def update_state_file():
+    return os.path.join(log_dir(), "update.json")
+
+
+class ReleaseInfo(NamedTuple):
+    version: str   # as shown to the user, e.g. "1.4.1"
+    tag: str       # e.g. "v1.4.1"
+    url: str       # the release page on GitHub
+
+
+def fetch_latest_release(timeout=10.0):
+    """The newest stable release on GitHub, or None if there isn't a usable one.
+
+    GitHub's "latest" endpoint already skips drafts and pre-releases (like
+    v1.3-beta). Raises on network or HTTP errors.
+    """
+    import urllib.request
+    req = urllib.request.Request(UPDATE_API_URL, headers={
+        "Accept": "application/vnd.github+json",
+        "User-Agent": f"SilencePlayer/{APP_VERSION}",
+    })
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read(1_000_000).decode("utf-8"))
+    if not isinstance(data, dict) or data.get("draft") or data.get("prerelease"):
+        return None
+    tag = data.get("tag_name")
+    if not isinstance(tag, str) or parse_version(tag) is None:
+        return None
+    tag = tag.strip()
+    url = data.get("html_url")
+    # Only ever open a page of this repository's releases.
+    if not (isinstance(url, str) and url.startswith(f"https://github.com/{GITHUB_REPO}/releases/")):
+        url = RELEASES_URL
+    return ReleaseInfo(tag.lstrip("vV"), tag, url)
+
+
+class UpdateChecker:
+    """Checks GitHub for a newer stable release in the background.
+
+    The first check runs shortly after start, then every few hours while the
+    app runs. Nothing is downloaded or installed: `on_result(info, error,
+    manual)` is called and the UI offers to open the release page.
+    "Skip this version" is remembered in update.json next to the log (it is
+    not a setting, so it doesn't wait for Save Settings).
+    """
+
+    FIRST_DELAY         = 15.0
+    INTERVAL            = 6 * 3600.0
+    RETRY_AFTER_FAILURE = 30 * 60.0
+
+    def __init__(self, current, on_result, enabled=lambda: True, fetch=None,
+                 state_path=None, clock=time.time):
+        self.current = current
+        self._on_result = on_result
+        self._enabled = enabled
+        self._fetch = fetch or (lambda: fetch_latest_release())
+        self._state_path = state_path or update_state_file()
+        self._clock = clock
+        self._stop = threading.Event()
+        self._wake = threading.Event()
+        self._manual = False
+        self._thread = None
+        self.last_checked = None
+        self.last_error = None
+        self.skipped = self._load_skipped()
+
+    # ── skipped version ──
+
+    def _load_skipped(self):
+        try:
+            with open(self._state_path, encoding="utf-8") as f:
+                value = json.load(f).get("skipped")
+            return value if isinstance(value, str) else None
+        except FileNotFoundError:
+            return None
+        except Exception:
+            log.warning("Could not read %s; ignoring it", self._state_path, exc_info=True)
+            return None
+
+    def skip(self, tag):
+        self.skipped = tag
+        try:
+            os.makedirs(os.path.dirname(self._state_path), exist_ok=True)
+            with open(self._state_path, "w", encoding="utf-8") as f:
+                json.dump({"skipped": tag}, f)
+        except Exception:
+            log.warning("Could not save the skipped version", exc_info=True)
+        log.info("User skipped update %s", tag)
+
+    # ── checking ──
+
+    def check(self, manual=False):
+        """Check once (blocking). Returns True if GitHub could be reached."""
+        try:
+            info, error = self._fetch(), None
+        except Exception as e:
+            info, error = None, e
+            log_throttled("update_check", logging.INFO, "Update check failed: %s", e,
+                          interval=3600)
+        self.last_checked = self._clock()
+        self.last_error = error
+        newer = None
+        if info is not None and is_newer_release(info.tag, self.current):
+            if manual or info.tag != self.skipped:
+                newer = info
+                log.info("Update available: %s (running %s)", info.tag, self.current)
+            else:
+                log.info("Update %s available but skipped by the user", info.tag)
+        elif error is None:
+            log.info("No update: latest release is %s, running %s",
+                     info.tag if info else "unknown", self.current)
+        try:
+            self._on_result(newer, error, manual)
+        except Exception:
+            log.exception("Update result handler failed")
+        return error is None
+
+    def check_now(self):
+        """Ask the background thread to check right away (e.g. "Check now")."""
+        self._manual = True
+        self._wake.set()
+
+    def start(self):
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="UpdateCheck")
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        self._wake.set()
+
+    def _loop(self):
+        delay = self.FIRST_DELAY
+        while True:
+            self._wake.wait(delay)
+            if self._stop.is_set():
+                return
+            self._wake.clear()
+            manual, self._manual = self._manual, False
+            if manual or self._enabled():
+                ok = self.check(manual=manual)
+                delay = self.INTERVAL if ok else self.RETRY_AFTER_FAILURE
+            else:
+                delay = self.INTERVAL
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2174,10 +2362,22 @@ class App:
             self._startup.repair_path()
         except Exception:
             log.warning("Could not check the Start with Windows entry", exc_info=True)
+        self._version    = current_version()
+        if self._version != APP_VERSION:
+            log.warning("Pretending to be version %s to test the update notice", self._version)
+        self._update_info  = None       # a newer release, while one is known
+        self._update_later = set()      # tags the user said "Later" to (this session)
+        self._update_notified = set()
+        self.updater = UpdateChecker(
+            self._version,
+            on_result=lambda info, err, manual: self.call_in_ui(
+                self._on_update_result, info, err, manual),
+            enabled=lambda: self.config.get("check_updates", True) is not False)
 
         self._build_ui()
         self.root.after(self.UI_POLL_MS, self._drain_ui_queue)
         threading.Thread(target=self._build_tray, daemon=True, name="Tray").start()
+        self.updater.start()
         if instance is not None:
             instance.listen(lambda: self.call_in_ui(self._show_window))
 
@@ -2297,11 +2497,9 @@ class App:
                  f"It may only be reacting to it (mirroring).")
         self.suggest_btn.config(
             text="Treat as mirroring app" if PROCTAP_IMPORT_ERROR is None else "Exclude it")
-        if not self.suggest_row.winfo_ismapped():
+        if not self._bar_shown(self.suggest_row):
             self.suggest_row.pack(fill="x", before=self.status_label)
-            self.root.update_idletasks()
-            # Grow the (fixed-size) window so the bar doesn't cover the settings.
-            self.root.geometry(f"{self.WINDOW_W}x{self.WINDOW_H + self.suggest_row.winfo_reqheight()}")
+            self._fit_window()
         new = [n for n in names if n not in self._notified_suspects]
         if new and self.tray is not None and self.root.state() == "withdrawn":
             self._notified_suspects.update(new)
@@ -2312,10 +2510,116 @@ class App:
                 log.debug("Tray notification failed", exc_info=True)
 
     def _hide_mirror_suggestion(self):
-        if self.suggest_row.winfo_ismapped():
+        if self._bar_shown(self.suggest_row):
             self.suggest_row.pack_forget()
-            self.root.geometry(f"{self.WINDOW_W}x{self.WINDOW_H}")
+            self._fit_window()
         self._suggested = []
+
+    # ── bars above the status line ──
+
+    @staticmethod
+    def _bar_shown(bar):
+        # winfo_ismapped() is False while the window is hidden in the tray.
+        return bar.winfo_manager() == "pack"
+
+    def _fit_window(self):
+        """Grow the (fixed-size) window so shown bars don't cover the settings."""
+        self.root.update_idletasks()
+        extra = sum(bar.winfo_reqheight() for bar in (self.update_row, self.suggest_row)
+                    if self._bar_shown(bar))
+        self.root.geometry(f"{self.WINDOW_W}x{self.WINDOW_H + extra}")
+
+    # ── update notice ──
+
+    def _on_update_result(self, info, error, manual):
+        if info is not None:
+            self._update_info = info
+            if manual or info.tag not in self._update_later:
+                self._show_update_bar(info)
+        elif error is None:
+            # Up to date (or the newer release was skipped / withdrawn).
+            self._update_info = None
+            self._hide_update_bar()
+            if manual:
+                self.set_status(f"You have the latest version (v{self._version}).")
+        elif manual:
+            self.set_status("Couldn't check for updates. Check your internet connection "
+                            "and try again.")
+        self._refresh_update_status()
+        self._refresh_tray_menu()
+
+    def _show_update_bar(self, info):
+        self.update_label.config(
+            text=f"Silence Player v{info.version} is available. You have v{self._version}.")
+        if not self._bar_shown(self.update_row):
+            self.update_row.pack(fill="x", before=self.status_label)
+            self._fit_window()
+        if (info.tag not in self._update_notified and self.tray is not None
+                and self.root.state() == "withdrawn"):
+            self._update_notified.add(info.tag)
+            try:
+                self.tray.notify(f"Version {info.version} is available. Right-click the "
+                                 f"tray icon to download it.", "Silence Player update")
+            except Exception:
+                log.debug("Tray notification failed", exc_info=True)
+
+    def _hide_update_bar(self):
+        if self._bar_shown(self.update_row):
+            self.update_row.pack_forget()
+            self._fit_window()
+
+    def _open_update(self):
+        info = self._update_info
+        url = info.url if info is not None else RELEASES_URL
+        log.info("Opening the release page: %s", url)
+        try:
+            webbrowser.open(url)
+            self.set_status("Opened the download page in your browser.")
+        except Exception:
+            log.warning("Could not open the browser", exc_info=True)
+            self.set_status(f"Couldn't open your browser. The download is at {url}")
+        self._hide_update_bar()
+
+    def _skip_update(self):
+        info = self._update_info
+        if info is not None:
+            self.updater.skip(info.tag)
+            self.set_status(f"OK, you won't be reminded about v{info.version}. "
+                            f"Advanced > Check now still shows it.")
+        self._update_info = None
+        self._hide_update_bar()
+        self._refresh_update_status()
+        self._refresh_tray_menu()
+
+    def _update_later_clicked(self):
+        if self._update_info is not None:
+            self._update_later.add(self._update_info.tag)
+        self._hide_update_bar()
+
+    def _check_updates_now(self):
+        self.update_status.config(text="Checking…", fg=self._DIM)
+        self.updater.check_now()
+
+    def _refresh_update_status(self):
+        on = self.config.get("check_updates", True) is not False
+        self.update_toggle.config(bg=self._GOOD if on else "#313244",
+                                  fg="#1e1e2e" if on else "#6c7086",
+                                  text="Enabled" if on else "Disabled")
+        u = self.updater
+        if self._update_info is not None:
+            text, color = f"● v{self._update_info.version} is available", self._GOOD
+        elif u.last_checked is None:
+            text = ("● Checks GitHub for new versions" if on
+                    else "● Off — Silence Player won't check GitHub")
+            color = self._DIM
+        elif u.last_error is not None:
+            text, color = "● Couldn't check (no internet?)", "#f9e2af"
+        else:
+            when = time.strftime("%H:%M", time.localtime(u.last_checked))
+            text, color = f"● Up to date (checked at {when})", self._DIM
+        if self._version != APP_VERSION:
+            text += f" · test mode: acting as v{self._version}"
+        self.update_status.config(text=text, fg=color)
 
     def _dismiss_mirror_suggestion(self):
         self._dismissed_suspects.update(self._suggested)
@@ -2356,6 +2660,11 @@ class App:
             menu = pystray.Menu(
                 pystray.MenuItem("Open Settings", self._tray_open, default=True),
                 pystray.MenuItem(
+                    lambda item: (f"Download v{self._update_info.version}"
+                                  if self._update_info is not None else "Download update"),
+                    self._tray_update,
+                    visible=lambda item: self._update_info is not None),
+                pystray.MenuItem(
                     lambda item: "Stop Monitoring" if self.monitoring else "Start Monitoring",
                     self._tray_toggle),
                 pystray.Menu.SEPARATOR,
@@ -2378,6 +2687,9 @@ class App:
 
     def _tray_open(self, icon=None, item=None):
         self.call_in_ui(self._show_window)
+
+    def _tray_update(self, icon=None, item=None):
+        self.call_in_ui(self._open_update)
 
     def _tray_toggle(self, icon=None, item=None):
         self.call_in_ui(self._toggle_monitoring)
@@ -2405,6 +2717,8 @@ class App:
         log.info("Quit requested")
         self.monitoring = False
         self.root.withdraw()
+
+        self.updater.stop()
 
         def shutdown():
             try:
@@ -2514,6 +2828,24 @@ class App:
 
         status_frame = tk.Frame(self.root, bg="#181825")
         status_frame.pack(fill="x", side="bottom")
+
+        # "A new version is available" (hidden until needed).
+        self.update_row = tk.Frame(status_frame, bg="#313244", padx=10, pady=6)
+        self.update_label = tk.Label(self.update_row, bg="#313244", fg=FG,
+                                     font=("Segoe UI", 9), wraplength=490, justify="left")
+        self.update_label.pack(anchor="w")
+        update_buttons = tk.Frame(self.update_row, bg="#313244")
+        update_buttons.pack(anchor="w", pady=(4, 0))
+        self.update_btn = tk.Button(update_buttons, text="Download", command=self._open_update,
+                                    bg="#a6e3a1", fg="#1e1e2e", relief="flat",
+                                    font=("Segoe UI", 9, "bold"), padx=10, pady=3,
+                                    cursor="hand2")
+        self.update_btn.pack(side="left")
+        for text, cmd in (("Skip this version", self._skip_update),
+                          ("Later", self._update_later_clicked)):
+            tk.Button(update_buttons, text=text, command=cmd,
+                      bg=BTN_BG, fg=DIM, relief="flat", font=("Segoe UI", 9, "bold"),
+                      padx=10, pady=3, cursor="hand2").pack(side="left", padx=(6, 0))
 
         # One-click fix for an app that seems to mirror our sound (hidden until needed).
         self.suggest_row = tk.Frame(status_frame, bg="#313244", padx=10, pady=6)
@@ -3006,6 +3338,33 @@ class App:
 
         self._refresh_mirror_ui()
         self._apply_mirror_state()
+
+        # Update check
+        update_card = tk.Frame(parent, bg=CARD, padx=16, pady=10)
+        update_card.pack(fill="x", padx=24, pady=4)
+        top = tk.Frame(update_card, bg=CARD)
+        top.pack(fill="x")
+        tk.Label(top, text="Check for updates", bg=CARD, fg=FG,
+                 font=("Segoe UI", 10, "bold")).pack(side="left")
+
+        def toggle_updates():
+            on = not (self.config.get("check_updates", True) is not False)
+            self.config["check_updates"] = on
+            if on and self.updater.last_checked is None:
+                self.updater.check_now()
+            self._refresh_update_status()
+
+        self.update_toggle = tk.Button(top, command=toggle_updates, relief="flat",
+                                       font=("Segoe UI", 9, "bold"), padx=12, pady=4,
+                                       cursor="hand2")
+        self.update_toggle.pack(side="right")
+        tk.Button(top, text="Check now", command=self._check_updates_now, bg=BTN_BG, fg=ACC,
+                  relief="flat", font=("Segoe UI", 9, "bold"), padx=10, pady=4,
+                  cursor="hand2").pack(side="right", padx=(0, 6))
+        self.update_status = tk.Label(update_card, bg=CARD, fg=DIM, font=("Segoe UI", 9),
+                                      anchor="w")
+        self.update_status.pack(anchor="w", fill="x", pady=(6, 0))
+        self._refresh_update_status()
 
     def _refresh_mirror_ui(self, select=None):
         on = bool(self.mirror_fix_var.get())

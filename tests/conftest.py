@@ -210,6 +210,9 @@ except ImportError:
 
 import app as app_module  # noqa: E402
 
+# The real function, kept before the offline fixture below replaces it.
+REAL_FETCH_LATEST_RELEASE = app_module.fetch_latest_release
+
 
 # ── shared fixtures ──────────────────────────────────────────────────────────
 
@@ -267,6 +270,16 @@ def _no_real_registry(monkeypatch):
     def unavailable():
         raise ImportError("registry disabled in tests")
     monkeypatch.setattr(app_module, "_WinRegistry", unavailable)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_update_check(monkeypatch, tmp_path):
+    """Tests never contact GitHub or write the real update.json."""
+    def offline(timeout=10.0):
+        raise OSError("network disabled in tests")
+    monkeypatch.setattr(app_module, "fetch_latest_release", offline)
+    monkeypatch.setattr(app_module, "update_state_file", lambda: str(tmp_path / "update.json"))
+    monkeypatch.delenv(app_module.PRETEND_VERSION_ENV, raising=False)
 
 
 @pytest.fixture
