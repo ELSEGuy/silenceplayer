@@ -47,7 +47,7 @@ def snap_to_step(value, step, lowest=0):
 
 
 class App:
-    WINDOW_W, WINDOW_H = 520, 770
+    WINDOW_W, WINDOW_H = 520, 750
     VOLUME_STEP = 5                # the volume slider moves 5, 10, 15 … 100
     VOLUME_LOWEST = 5              # muting makes no sense for the ambient sound
     DUCK_STEP = 10                 # the duck slider: 0 (stop), 10 … 90, 100 (keep playing)
@@ -648,33 +648,44 @@ class App:
 
         def mode_btn(text, val):
             def on_click():
+                if self.monitoring:          # (the other mode is greyed out anyway)
+                    return
                 self.mode_var.set(val)
                 self.config["mode"] = val
                 _refresh_mode()
             b = tk.Button(mode_frame, text=text, command=on_click,
                           relief="flat", font=("Segoe UI", 10, "bold"),
-                          padx=12, pady=5, cursor="hand2")
+                          padx=12, pady=5, cursor="hand2", disabledforeground="#585b70")
             b.pack(side="left", padx=3)
+            # A disabled button ignores its command but still sees the click.
+            b.bind("<Button-1>", lambda e: self._mode_locked_hint(val), add="+")
             return b
 
         self.btn_single   = mode_btn("Single File", "single")
         self.btn_playlist = mode_btn("Playlist",    "playlist")
 
+        def style_mode_buttons():
+            """Selected mode highlighted; while monitoring the other one is greyed out."""
+            m, locked = self.mode_var.get(), self.monitoring
+            for b, val in ((self.btn_single, "single"), (self.btn_playlist, "playlist")):
+                selected = m == val
+                b.config(bg=ACC if selected else BTN_BG, fg="#1e1e2e" if selected else DIM,
+                         state="disabled" if locked and not selected else "normal",
+                         cursor="arrow" if locked else "hand2")
+
+        self._style_mode_buttons = style_mode_buttons
+
         def _refresh_mode():
-            m = self.mode_var.get()
-            if m == "single":
-                self.btn_single.config(bg=ACC, fg="#1e1e2e")
-                self.btn_playlist.config(bg=BTN_BG, fg=DIM)
+            style_mode_buttons()
+            if self.mode_var.get() == "single":
                 single_card.pack(fill="x", padx=24, pady=(8, 4))
                 playlist_card.pack_forget()
             else:
-                self.btn_playlist.config(bg=ACC, fg="#1e1e2e")
-                self.btn_single.config(bg=BTN_BG, fg=DIM)
                 playlist_card.pack(fill="x", padx=24, pady=(8, 4))
                 single_card.pack_forget()
 
         single_card = tk.Frame(parent, bg=CARD, padx=16, pady=12)
-        label(single_card, "Ambient Sound File (MP3, OPUS, M4A, FLAC, MP4)", bold=True).grid(
+        label(single_card, "Ambient Sound File", bold=True).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
         self.mp3_var = tk.StringVar()
         self.mp3_entry = self._path_field(single_card, self.mp3_var, self._browse_mp3, BTN_BG, FG)
@@ -755,14 +766,15 @@ class App:
         shared_card = tk.Frame(parent, bg=CARD, padx=16, pady=12)
         shared_card.pack(fill="x", padx=24, pady=4)
 
-        # The volume is set with the slider in the Now playing card.
+        # One row: Silence Timeout on the left, Fade on the right. (The volume is
+        # the slider in the Now playing card; Start with Windows is in Advanced.)
         self.silence_var = tk.StringVar(value=str(self.config["silence_seconds"]))
         silence_row = tk.Frame(shared_card, bg=CARD)
-        silence_row.grid(row=0, column=0, columnspan=2, sticky="w")
-        label(silence_row, "Silence Timeout", bold=True, color=FG).pack(side="left", padx=(0, 12))
-        self.silence_entry = entry(silence_row, self.silence_var, width=6)
+        silence_row.pack(side="left")
+        label(silence_row, "Silence Timeout", bold=True, color=FG).pack(side="left", padx=(0, 10))
+        self.silence_entry = entry(silence_row, self.silence_var, width=5)
         self.silence_entry.pack(side="left")
-        label(silence_row, "seconds", size=9, color=DIM).pack(side="left", padx=(8, 0))
+        label(silence_row, "sec", size=9, color=DIM).pack(side="left", padx=(6, 0))
 
         # Typed values are committed when the field loses focus or Enter is pressed
         # (and when the window is closed), so "settings save automatically" holds.
@@ -770,40 +782,27 @@ class App:
         self.silence_entry.bind("<Return>",   lambda e: self._commit_inputs_quietly())
 
         fade_row = tk.Frame(shared_card, bg=CARD)
-        fade_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 0))
-        label(fade_row, "Fade-in / Fade-out", bold=True, color=FG).pack(side="left", padx=(0, 12))
+        fade_row.pack(side="right")
+        label(fade_row, "Fade", bold=True, color=FG).pack(side="left", padx=(0, 10))
 
         self.fade_enabled_var = tk.BooleanVar(value=self.config.get("fade_enabled", True))
 
         def toggle_fade():
             v = self.fade_enabled_var.get()
             self.config["fade_enabled"] = v
-            fade_btn.config(
+            self.fade_btn.config(
                 bg="#a6e3a1" if v else BTN_BG,
                 fg="#1e1e2e" if v else DIM,
                 text="Enabled" if v else "Disabled")
 
-        fade_btn = tk.Button(fade_row,
-                             command=lambda: [
-                                 self.fade_enabled_var.set(not self.fade_enabled_var.get()),
-                                 toggle_fade()],
-                             relief="flat", font=("Segoe UI", 9, "bold"),
-                             padx=12, pady=4, cursor="hand2")
-        fade_btn.pack(side="left")
+        self.fade_btn = tk.Button(fade_row,
+                                  command=lambda: [
+                                      self.fade_enabled_var.set(not self.fade_enabled_var.get()),
+                                      toggle_fade()],
+                                  relief="flat", font=("Segoe UI", 9, "bold"), width=8,
+                                  padx=8, pady=4, cursor="hand2")
+        self.fade_btn.pack(side="left")
         toggle_fade()
-
-        startup_row = tk.Frame(shared_card, bg=CARD)
-        startup_row.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
-        label(startup_row, "Start with Windows", bold=True, color=FG).pack(side="left", padx=(0, 12))
-
-        self.startup_var = tk.BooleanVar(value=self._startup.is_enabled())
-        self.startup_btn = tk.Button(startup_row, command=self._toggle_startup_choice,
-                                     relief="flat", font=("Segoe UI", 9, "bold"),
-                                     padx=12, pady=4, cursor="hand2")
-        self.startup_btn.pack(side="left")
-        self.startup_hint = label(shared_card, "", size=8, color=DIM)
-        self.startup_hint.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        self._refresh_startup_ui()
 
         duck_card = tk.Frame(parent, bg=CARD, padx=16, pady=12)
         duck_card.pack(fill="x", padx=24, pady=4)
@@ -814,7 +813,7 @@ class App:
         self.duck_label = tk.Label(duck_top, bg=CARD, fg=ACC, font=("Segoe UI", 10, "bold"))
         self.duck_label.pack(side="right")
 
-        label(duck_card, "0% = Stop ambient   |   1-99% = Duck volume   |   100% = Keep playing",
+        label(duck_card, "0% = Stop ambient   |   10-90% = Duck volume   |   100% = Keep playing",
               size=8, color=DIM).pack(anchor="w", pady=(2, 6))
 
         self.config["duck_percent"] = snap_to_step(self.config.get("duck_percent", 0),
@@ -1313,6 +1312,23 @@ class App:
         self.update_status.pack(anchor="w", fill="x", pady=(6, 0))
         self._refresh_update_status()
 
+        # Start with Windows (applied with Save Settings, like the other settings)
+        startup_card = tk.Frame(parent, bg=CARD, padx=16, pady=10)
+        startup_card.pack(fill="x", padx=24, pady=4)
+        startup_top = tk.Frame(startup_card, bg=CARD)
+        startup_top.pack(fill="x")
+        tk.Label(startup_top, text="Start with Windows", bg=CARD, fg=FG,
+                 font=("Segoe UI", 10, "bold")).pack(side="left")
+        self.startup_var = tk.BooleanVar(value=self._startup.is_enabled())
+        self.startup_btn = tk.Button(startup_top, command=self._toggle_startup_choice,
+                                     relief="flat", font=("Segoe UI", 9, "bold"),
+                                     padx=12, pady=4, cursor="hand2")
+        self.startup_btn.pack(side="right")
+        self.startup_hint = tk.Label(startup_card, bg=CARD, fg=DIM, font=("Segoe UI", 9),
+                                     anchor="w", justify="left", wraplength=420)
+        self.startup_hint.pack(anchor="w", fill="x", pady=(6, 0))
+        self._refresh_startup_ui()
+
     def _refresh_mirror_ui(self, select=None):
         on = bool(self.mirror_fix_var.get())
         self.mirror_btn.config(bg=self._GOOD if on else "#313244",
@@ -1352,6 +1368,11 @@ class App:
                 self.set_status(f"Switching to {display_name(path)}...")
 
     PLAYLIST_LOCKED = "Stop Monitoring to change the playlist."
+    MODE_LOCKED = "Stop Monitoring to change the mode."
+
+    def _mode_locked_hint(self, val):
+        if self.monitoring and self.mode_var.get() != val:
+            self.set_status(self.MODE_LOCKED)
 
     def _playlist_locked_hint(self, event=None):
         if self.monitoring:
@@ -1419,6 +1440,7 @@ class App:
             self.start_btn.config(text="Start Monitoring", fg="#a6e3a1")
         self.playlist_browse_btn.config(state="disabled" if on else "normal",
                                         cursor="arrow" if on else "hand2")
+        self._style_mode_buttons()
         self._refresh_tray_menu()
 
     def _start_monitoring(self):

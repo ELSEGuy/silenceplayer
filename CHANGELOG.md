@@ -17,9 +17,12 @@
   with Browse while the ambient sound is playing or ducked fades the current
   file out and the new one in (1 second each way, or instantly with fades
   off), at the same level. While paused, the new file waits paused.
-- **Playlist locked while monitoring.** The playlist folder can't be changed
-  while monitoring is on (Browse is greyed out); stop monitoring to pick
-  another folder.
+- **Playlist and mode locked while monitoring.** The playlist folder and the
+  Single File / Playlist mode can't be changed while monitoring is on (Browse
+  and the other mode are greyed out); stop monitoring to change them.
+- **Tidier Player tab.** Silence Timeout and Fade share one row, Start with
+  Windows moved to the Advanced tab, the file card is just "Ambient Sound
+  File", and the duck description reads 10-90% to match the slider's steps.
 - **Pause from the tray.** Right-click the tray icon for Pause/Resume while a
   sound is playing. Pause fades out quickly and holds your place.
 - **Live levels.** The volume slider and the "When External Audio Detected"

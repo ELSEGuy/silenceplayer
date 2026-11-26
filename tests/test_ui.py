@@ -347,3 +347,57 @@ def test_playlist_is_locked_while_monitoring(appmod, root, cfg_path, tmp_path,
     a._handle_auto_stop("stopped")
     assert a.playlist_browse_btn.cget("state") == "normal"
     a.player.stop(wait=True, timeout=3)
+
+
+def test_mode_is_locked_while_monitoring(appmod, root, cfg_path, tmp_path, fast_timing):
+    song = tmp_path / "rain.mp3"
+    song.write_bytes(b"")
+    cfg_path.write_text(json.dumps({"mode": "single", "mp3_path": str(song)}))
+    a = make_app(appmod, root)
+    assert a.monitoring                          # a playable file starts monitoring
+    assert a.btn_single.cget("state") == "normal"        # the current mode stays lit
+    assert a.btn_playlist.cget("state") == "disabled"
+    a.btn_playlist.event_generate("<Button-1>")
+    pump(root, 0.05)
+    assert a.status_var.get() == "Stop Monitoring to change the mode."
+    a.btn_single.invoke()                        # clicking the current mode: nothing
+    assert a.config["mode"] == "single"
+
+    a._toggle_monitoring()                       # Stop Monitoring
+    assert a.btn_playlist.cget("state") == "normal"
+    a.btn_playlist.invoke()
+    assert a.config["mode"] == "playlist" and a.mode_var.get() == "playlist"
+    a.btn_single.invoke()
+    assert a.config["mode"] == "single"
+    a.player.stop(wait=True, timeout=3)
+    a.monitor.stop(wait=True)
+
+
+def test_settings_layout(appmod, root, cfg_path, fast_timing):
+    a = make_app(appmod, root)
+    a._show_window()
+    pump(root, 0.1)
+    # Silence Timeout and Fade share one row
+    assert a.silence_entry.master.master is a.fade_btn.master.master
+    assert abs(a.silence_entry.winfo_rooty() - a.fade_btn.winfo_rooty()) < 12
+    # Start with Windows lives in the Advanced tab only
+    w = a.startup_btn
+    while w is not None and w not in (a.tab_main, a.tab_advanced):
+        w = w.master
+    assert w is a.tab_advanced
+
+    def texts(widget):
+        out = []
+        for child in widget.winfo_children():
+            if isinstance(child, appmod.tk.Label):
+                out.append(child.cget("text"))
+            out.extend(texts(child))
+        return out
+
+    main = texts(a.tab_main)
+    assert "Ambient Sound File" in main
+    assert not any("MP3, OPUS" in t for t in main)
+    assert not any("Start with Windows" in t for t in main)
+    assert any("10-90% = Duck volume" in t for t in main)
+    assert any(t == "Start with Windows" for t in texts(a.tab_advanced))
+    a.monitor.stop(wait=True)
