@@ -9,7 +9,6 @@ from logging.handlers import RotatingFileHandler
 
 from .paths import APP_DIR, log_dir
 
-
 log = logging.getLogger("silenceplayer")
 
 

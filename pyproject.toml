@@ -4,3 +4,16 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-p no:cacheprovider"
+
+# Code checker (runs in CI): catches likely bugs, not style preferences.
+#   python -m ruff check .          (add --fix to sort imports automatically)
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# E9 syntax errors, F undefined/unused names, B likely bugs, I import order
+select = ["E9", "F", "B", "I"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["silenceplayer"]

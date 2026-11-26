@@ -13,9 +13,21 @@ from tkinter import filedialog, messagebox
 import pystray
 
 from .. import APP_VERSION
-from ..config import SILENCE_MAX, SILENCE_MIN, VOLUME_MAX, VOLUME_MIN, ValidationError, _coerce_mirror_apps, enabled_mirror_apps, load_config, normalize_app_name, parse_int_field, save_config
+from ..config import (
+    SILENCE_MAX,
+    SILENCE_MIN,
+    VOLUME_MAX,
+    VOLUME_MIN,
+    ValidationError,
+    _coerce_mirror_apps,
+    enabled_mirror_apps,
+    load_config,
+    normalize_app_name,
+    parse_int_field,
+    save_config,
+)
 from ..logs import log, log_throttled
-from ..mirror import MirrorFix, PROCTAP_IMPORT_ERROR
+from ..mirror import PROCTAP_IMPORT_ERROR, MirrorFix
 from ..monitor import AudioMonitor
 from ..nowplaying import describe_now_playing
 from ..paths import resource_path

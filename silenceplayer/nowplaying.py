@@ -1,10 +1,15 @@
 """What the Now playing card, the tray tooltip and the tray menu show.
 """
+from __future__ import annotations
+
 import math
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 from .sources import display_name
 
+if TYPE_CHECKING:          # only for the type hints
+    from .monitor import MonitorInfo
+    from .player import TrackInfo
 
 TRAY_TIP_MAX = 127      # Windows cuts tray tooltips at 127 characters
 
@@ -17,14 +22,14 @@ class NowPlaying(NamedTuple):
     kind: str           # "playing", "ducked", "waiting", "off": picks the colours
     title: str          # file name
     detail: str         # time, countdown or reason
-    progress: float     # 0..1, or None for no bar
+    progress: float | None  # 0..1, or None for no bar
     tooltip: str        # tray icon tooltip
     menu: str           # first (greyed) line of the plain Windows tray menu (fallback)
     menu_head: str = "" # Silence Player's own tray menu: small coloured line...
     menu_line: str = "" # ...and the line under it
 
 
-def format_clock(seconds):
+def format_clock(seconds: float) -> str:
     seconds = max(0, int(seconds))
     h, rest = divmod(seconds, 3600)
     m, s = divmod(rest, 60)
@@ -44,7 +49,8 @@ def _apps_text(apps):
     return f"{apps[0]} and {len(apps) - 1} more"
 
 
-def describe_now_playing(monitoring, info, track, config):
+def describe_now_playing(monitoring: bool, info: MonitorInfo | None,
+                         track: TrackInfo | None, config: dict) -> NowPlaying:
     """What the tray tooltip, tray menu and the window's card should show."""
     if track is not None and track.path:
         name = display_name(track.path)
@@ -72,11 +78,18 @@ def describe_now_playing(monitoring, info, track, config):
     def head(text):
         return _shorten(text, TRAY_MENU_MAX)
 
+    def listening():
+        return NowPlaying("Waiting", "waiting", name, "Listening…", None,
+                          tip("Listening…"), "Waiting for silence",
+                          "Waiting for silence", "Listening…")
+
     if not monitoring:
         return NowPlaying("Off", "off", name, "Monitoring is off", None,
                           tip("Monitoring is off"), "Monitoring is off",
                           "Monitoring is off", head(name))
-    phase = info.phase if info is not None else "starting"
+    if info is None:                     # the monitor hasn't looked yet
+        return listening()
+    phase = info.phase
 
     if phase == "playing":
         detail, bar = clock_and_bar()
@@ -108,6 +121,4 @@ def describe_now_playing(monitoring, info, track, config):
         return NowPlaying("Waiting", "waiting", name, f"Plays in {secs}s if it stays silent",
                           None, tip(f"Ambient in {secs}s"), "Waiting for silence",
                           "Waiting for silence", f"Ambient starts in {secs}s")
-    return NowPlaying("Waiting", "waiting", name, "Listening…", None,
-                      tip("Listening…"), "Waiting for silence",
-                      "Waiting for silence", "Listening…")
+    return listening()

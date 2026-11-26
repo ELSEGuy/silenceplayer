@@ -1,0 +1,15 @@
+# Opens a pull request when a dependency (Python package or GitHub Action)
+# has a new version, including security fixes. CI tests every one of them.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    groups:
+      python-packages:
+        patterns: ["*"]
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"

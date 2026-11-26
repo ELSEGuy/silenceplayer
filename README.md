@@ -51,9 +51,15 @@ This makes it useful for ambient sound, rain sounds, white noise, room tone, foc
 
 ## 📥 Download
 
-The latest packaged Windows build is available from the [GitHub Releases](../../releases/latest) page.
+Get the latest version from the [GitHub Releases](../../releases/latest) page:
 
-If you use a packaged release, you do not need to install Python manually.
+- **SilencePlayer-Setup-x.y.z.exe**: the installer. It installs for your Windows
+  user only (no admin rights needed), adds a Start menu shortcut, and can be
+  uninstalled from Windows Settings. Installing a newer version keeps your settings.
+- **SilencePlayer-x.y.z-portable.zip**: the same app as a folder. Unzip it anywhere
+  and run `silenceplayer.exe`.
+
+You don't need to install Python. Silence Player tells you when a new version is out.
 
 ## 🎵 Supported formats
 
@@ -97,7 +103,9 @@ The current version will remain available while 2.0 is being developed.
 ## 🩺 Settings and logs
 
 - Changes apply right away. Click **Save Settings** to keep them: they are saved to
-  `config.json` next to `silenceplayer.exe`, and only then.
+  `config.json` next to `silenceplayer.exe`, and only then. (If Windows doesn't allow
+  writing there, for example in Program Files, Silence Player uses
+  `%APPDATA%\SilencePlayer\config.json` instead.)
   If that file is ever damaged, Silence Player keeps a copy as
   `config.json.corrupt-<date>` and starts with default settings.
 - A diagnostic log is written to `%LOCALAPPDATA%\SilencePlayer\silenceplayer.log`
@@ -113,27 +121,60 @@ The current version will remain available while 2.0 is being developed.
 
 ## 🛠️ Building from source
 
-Requirements: Windows 10 20H1 or later (x64) and Python 3.12.
+Requirements: Windows 10 20H1 or later (x64) and Python 3.12. For the installer,
+also [Inno Setup](https://jrsoftware.org/isinfo.php).
 
 ```powershell
 git clone https://github.com/ELSEGuy/silenceplayer
 cd silenceplayer
-powershell -ExecutionPolicy Bypass -File build.ps1
+powershell -ExecutionPolicy Bypass -File build.ps1              # app folder + portable zip
+powershell -ExecutionPolicy Bypass -File build.ps1 -Installer   # ...and the installer
 ```
 
 `build.ps1` creates a clean `.venv-build`, installs the pinned versions from
-`requirements.txt` and `requirements-dev.txt`, runs the tests, and builds
-`dist\silenceplayer.exe` with `silenceplayer.spec`. It prints the size and SHA-256
-and writes the exact package versions to `dist\build-freeze.txt`.
+`requirements.txt` and `requirements-dev.txt`, runs the tests and builds:
 
-The VLC engine is **not** downloaded during the build. The repo contains the exact
-copy it comes from: `libvlc.dll`, `libvlccore.dll` and `plugins\` from
-**VLC 3.0.23 (x64)**. Only the plugins needed for local audio playback are bundled
-(listed in `silenceplayer.spec`); the repo keeps the full set.
+- `dist\SilencePlayer\` the app folder (`silenceplayer.exe`, with Python and VLC in `_internal`)
+- `dist\SilencePlayer-<version>-portable.zip` that folder, zipped
+- `dist\SilencePlayer-Setup-<version>.exe` the installer (with `-Installer`)
+- `dist\SHA256SUMS.txt` and `dist\build-freeze.txt` (checksums, exact package versions)
+
+The VLC engine is **not** downloaded during the build: the repo contains
+`libvlc.dll`, `libvlccore.dll` and the plugins Silence Player uses, from the official
+**VLC 3.0.24 (x64)** zip. To move to a newer VLC, run
+`python tools\update_vlc.py <version>`: it downloads the official zip, checks it
+against VideoLAN's published SHA-256, and replaces those files.
 
 To run from source instead: `pip install -r requirements.txt`, then `python app.py`.
-Tests: `pip install -r requirements-dev.txt`, then `python -m pytest`. The tests use
-fakes for VLC and the Windows audio APIs, so they run anywhere.
+Tests: `pip install -r requirements-dev.txt`, then `python -m pytest` (they use fakes
+for VLC and the Windows audio APIs, so they run anywhere). Check the code with
+`python -m ruff check .`.
+
+GitHub Actions runs the code check and the tests on every push, builds the installer
+and portable zip on every push to `master` or a `v*` branch, and turns a pushed tag
+like `v1.4.0` into a **draft** release with the files attached. See
+[RELEASING.md](RELEASING.md).
+
+### How the code is organised
+
+`app.py` only starts the app. The code is in `silenceplayer/`, one job per file:
+
+| File | What it does |
+|---|---|
+| `main.py` | Program start: logging, the single-instance check, then the window |
+| `paths.py` | Where files are: the app folder, bundled files, `config.json`, logs |
+| `config.py` | Settings: defaults, checking and repairing values, loading and saving |
+| `sources.py` | The ambient file or playlist, and where to resume |
+| `winaudio.py` | Which apps are making sound, on every output device |
+| `mirror.py` | The Mirroring Fix (tells mirroring apps apart from real sound) |
+| `monitor.py` | Waits for silence, then starts, stops or ducks the ambient sound |
+| `player.py` | VLC playback: fades, ducking, playlists |
+| `nowplaying.py` | What the Now playing card, tray tooltip and tray menu say |
+| `updates.py` | The update check against GitHub releases |
+| `startup.py` | Start with Windows |
+| `instance.py` | Only one Silence Player at a time |
+| `ui/window.py` | The Settings window and its tabs |
+| `ui/tray.py`, `ui/widgets.py` | The tray icon and menu, the scrolling name label |
 
 ## 🧩 Built with
 

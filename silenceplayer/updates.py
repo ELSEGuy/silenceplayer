@@ -1,5 +1,7 @@
 """Update check: asks GitHub whether a newer stable release exists.
 """
+from __future__ import annotations
+
 import json
 import logging
 import os
@@ -11,7 +13,6 @@ from typing import NamedTuple
 from . import APP_VERSION
 from .logs import log, log_throttled
 from .paths import log_dir
-
 
 GITHUB_REPO    = "ELSEGuy/silenceplayer"
 
@@ -29,7 +30,7 @@ PRETEND_VERSION_ENV = "SILENCEPLAYER_PRETEND_VERSION"
 _VERSION_RE = re.compile(r"^\s*v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(.*)$", re.IGNORECASE)
 
 
-def parse_version(text):
+def parse_version(text: str | None) -> tuple[tuple[int, ...], bool] | None:
     """'v1.3.0' → ((1, 3, 0), True). The flag is False for anything with a suffix
     ('1.4.0-dev', 'v1.3-beta'): those are not stable releases. None if unreadable."""
     m = _VERSION_RE.match(text or "") if isinstance(text, str) else None
@@ -39,7 +40,7 @@ def parse_version(text):
     return nums, m.group(4).strip() == ""
 
 
-def is_newer_release(tag, current):
+def is_newer_release(tag: str | None, current: str) -> bool:
     """True if `tag` is a stable release newer than the running `current` version.
     A test build like 1.4.0-dev counts as older than the 1.4.0 release."""
     latest, cur = parse_version(tag), parse_version(current)
@@ -48,12 +49,12 @@ def is_newer_release(tag, current):
     return latest[0] + (1,) > cur[0] + (1 if cur[1] else 0,)
 
 
-def current_version():
+def current_version() -> str:
     """APP_VERSION, unless a pretend version is set for testing the update notice."""
     return os.environ.get(PRETEND_VERSION_ENV, "").strip() or APP_VERSION
 
 
-def update_state_file():
+def update_state_file() -> str:
     return os.path.join(log_dir(), "update.json")
 
 
@@ -63,7 +64,7 @@ class ReleaseInfo(NamedTuple):
     url: str       # the release page on GitHub
 
 
-def fetch_latest_release(timeout=10.0):
+def fetch_latest_release(timeout: float = 10.0) -> ReleaseInfo | None:
     """The newest stable release on GitHub, or None if there isn't a usable one.
 
     GitHub's "latest" endpoint already skips drafts and pre-releases (like
@@ -132,7 +133,7 @@ class UpdateChecker:
             log.warning("Could not read %s; ignoring it", self._state_path, exc_info=True)
             return None
 
-    def skip(self, tag):
+    def skip(self, tag: str) -> None:
         self.skipped = tag
         try:
             os.makedirs(os.path.dirname(self._state_path), exist_ok=True)
@@ -144,7 +145,7 @@ class UpdateChecker:
 
     # ── checking ──
 
-    def check(self, manual=False):
+    def check(self, manual: bool = False) -> bool:
         """Check once (blocking). Returns True if GitHub could be reached."""
         try:
             info, error = self._fetch(), None
@@ -170,18 +171,18 @@ class UpdateChecker:
             log.exception("Update result handler failed")
         return error is None
 
-    def check_now(self):
+    def check_now(self) -> None:
         """Ask the background thread to check right away (e.g. "Check now")."""
         self._manual = True
         self._wake.set()
 
-    def start(self):
+    def start(self) -> None:
         if self._thread is not None:
             return
         self._thread = threading.Thread(target=self._loop, daemon=True, name="UpdateCheck")
         self._thread.start()
 
-    def stop(self):
+    def stop(self) -> None:
         self._stop.set()
         self._wake.set()
 

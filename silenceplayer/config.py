@@ -12,7 +12,6 @@ from typing import NamedTuple
 from .logs import log, log_throttled
 from .paths import CONFIG_FILE
 
-
 SILENCE_MIN, SILENCE_MAX = 1, 3600
 
 
@@ -284,6 +283,7 @@ def save_config(cfg, path=None):
     with _save_lock:
         try:
             data = json.dumps(dict(cfg), indent=2)
+            os.makedirs(folder, exist_ok=True)
             fd, tmp = tempfile.mkstemp(prefix=".config-", suffix=".tmp", dir=folder)
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as f:

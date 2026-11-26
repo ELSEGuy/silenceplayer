@@ -10,37 +10,7 @@ if not hasattr(tk, "Tk"):
     pytest.skip("tkinter placeholder module", allow_module_level=True)
 
 
-@pytest.fixture
-def root():
-    try:
-        r = tk.Tk()
-    except tk.TclError as e:
-        pytest.skip(f"no display: {e}")
-    yield r
-    try:
-        r.destroy()
-    except tk.TclError:
-        pass
-
-
-def pump(root, seconds=0.2):
-    end = time.monotonic() + seconds
-    while time.monotonic() < end:
-        root.update()
-        time.sleep(0.01)
-
-
-@pytest.fixture
-def cfg_path(appmod, tmp_path, monkeypatch):
-    path = tmp_path / "config.json"
-    monkeypatch.setattr(appmod, "CONFIG_FILE", str(path))
-    return path
-
-
-def make_app(appmod, root):
-    a = appmod.App(root)
-    pump(root, 0.3)
-    return a
+from conftest import make_app, pump  # noqa: E402
 
 
 def test_first_run_keeps_settings_visible(appmod, root, cfg_path, fast_timing):

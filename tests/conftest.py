@@ -386,3 +386,42 @@ def player_factory():
             p.stop(wait=True, timeout=3)
         except Exception:
             pass
+
+
+# ── Tk window fixtures (UI tests) ────────────────────────────────────────────
+
+@pytest.fixture
+def root():
+    tk = pytest.importorskip("tkinter")
+    if not hasattr(tk, "Tk"):
+        pytest.skip("tkinter placeholder module")
+    try:
+        r = tk.Tk()
+    except tk.TclError as e:
+        pytest.skip(f"no display: {e}")
+    yield r
+    try:
+        r.destroy()
+    except tk.TclError:
+        pass
+
+
+def pump(root, seconds=0.2):
+    """Let Tk process events for a moment."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        root.update()
+        time.sleep(0.01)
+
+
+@pytest.fixture
+def cfg_path(appmod, tmp_path, monkeypatch):
+    path = tmp_path / "config.json"
+    monkeypatch.setattr(appmod, "CONFIG_FILE", str(path))
+    return path
+
+
+def make_app(appmod, root):
+    a = appmod.App(root)
+    pump(root, 0.3)
+    return a

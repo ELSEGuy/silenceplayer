@@ -1,5 +1,7 @@
 """The monitor: waits for silence, then starts, stops or ducks the ambient sound.
 """
+from __future__ import annotations
+
 import logging
 import threading
 import time
@@ -8,7 +10,6 @@ from typing import NamedTuple
 from .config import runtime_settings
 from .logs import log, log_throttled
 from .winaudio import get_playing_apps
-
 
 # How long after the ambient sound starts a *new* "external" sound counts as
 # suspicious (an app reacting to our own sound), on top of the start cooldown.
@@ -38,7 +39,7 @@ class MonitorInfo(NamedTuple):
     playing), "playing", or "ducked" (playing quieter).
     """
     phase: str
-    remaining: float = None     # seconds left of a countdown (waiting / unducking)
+    remaining: float | None = None  # seconds left of a countdown (waiting / unducking)
     apps: tuple = ()            # apps that are playing (audio / ducked)
     duck_percent: int = 0
 

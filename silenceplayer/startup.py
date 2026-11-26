@@ -11,7 +11,7 @@ class _WinRegistry:
     """String values under HKEY_CURRENT_USER. Windows only (needs winreg)."""
 
     def __init__(self):
-        import winreg                      # ImportError off Windows
+        import winreg  # ImportError off Windows
         self._w = winreg
 
     def get(self, path, name):

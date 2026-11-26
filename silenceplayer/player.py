@@ -1,5 +1,7 @@
 """Ambient playback with VLC: fades, ducking, playlists and resume.
 """
+from __future__ import annotations
+
 import logging
 import os
 import threading
@@ -8,8 +10,15 @@ from typing import NamedTuple
 
 from .config import fade_seconds, runtime_settings
 from .logs import log, log_throttled
-from .sources import ResumeState, SUPPORTED_LABEL, collect_playlist, plan_playlist_start, plan_single_start, validate_ambient_source
 from .paths import BUNDLE_DIR
+from .sources import (
+    SUPPORTED_LABEL,
+    ResumeState,
+    collect_playlist,
+    plan_playlist_start,
+    plan_single_start,
+    validate_ambient_source,
+)
 from .winaudio import list_sessions
 
 # Use the VLC that ships with Silence Player, never one installed on the PC.
@@ -94,8 +103,8 @@ class _SessionVolume:
 
 class TrackInfo(NamedTuple):
     path: str
-    position: float = None
-    length: float = None
+    position: float | None = None
+    length: float | None = None
 
 
 class _PlaybackSession:

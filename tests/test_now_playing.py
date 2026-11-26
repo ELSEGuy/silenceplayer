@@ -1,10 +1,8 @@
 import threading
 
 import pytest
-
-from conftest import FakeApp, wait_until
-from test_monitor import Clock, StubPlayer, make_monitor
-from test_ui import cfg_path, make_app, pump, root  # noqa: F401  (fixtures too)
+from conftest import make_app, pump, wait_until
+from test_monitor import Clock, make_monitor
 
 FILE = "C:/Music/asmr/ANIMAL CROSSING OFFICE.opus"
 

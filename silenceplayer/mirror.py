@@ -11,7 +11,6 @@ import numpy as np
 from .logs import log, log_throttled
 from .winaudio import get_app_pids
 
-
 # ProcTap is only needed by the Mirroring Fix. If its
 # native extension can't load, the rest of the app must still work.
 try:

@@ -3,9 +3,8 @@ import json
 import threading
 
 import pytest
-
-from conftest import REAL_FETCH_LATEST_RELEASE as real_fetch, wait_until
-
+from conftest import REAL_FETCH_LATEST_RELEASE as real_fetch
+from conftest import wait_until
 
 # ── version comparison ───────────────────────────────────────────────────────
 
@@ -179,7 +178,7 @@ def test_background_thread_checks_and_respects_the_switch(appmod, tmp_path, monk
 
 # ── in the app ───────────────────────────────────────────────────────────────
 
-from test_ui import cfg_path, make_app, pump, root  # noqa: E402,F401  (fixtures too)
+from conftest import make_app, pump  # noqa: E402
 
 
 @pytest.fixture

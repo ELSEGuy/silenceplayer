@@ -5,9 +5,7 @@ import threading
 import types
 
 import pytest
-
 from conftest import wait_until
-
 
 # ── fake COM objects for _active_session_managers / list_sessions ────────────
 

@@ -27,6 +27,43 @@
 - **More apps on the Mirroring Fix list:** XSplit Broadcaster and Gamecaster,
   Lively Wallpaper and FluentFlyout. Existing settings get them added once; an
   app you removed from the list is not added back.
+- **Installer.** Releases now come as `SilencePlayer-Setup-x.y.z.exe`, which
+  installs Silence Player for your Windows user (no admin rights), adds a Start
+  menu shortcut and an uninstaller, and keeps your settings when you install a
+  newer version. A portable zip is there too, for running it from any folder.
+
+### Improved
+- **Apps on any output device are detected.** Silence Player used to watch only
+  Windows' default output device. An app playing on another one (a headset
+  picked in Discord's settings, a per-app output device in Windows) went
+  unnoticed and the ambient sound played over it. Every active output device is
+  watched now.
+- **The Mirroring Fix uses much less CPU.** It listened to each watched app by
+  asking for new audio every millisecond, about 2% of a CPU core per app even
+  when nothing played. It now checks every 20 ms and takes everything that
+  arrived at once, with the same results.
+- **More reliable in the background.** The parts that watch audio run in their
+  own threads, and Windows only lets those use its audio system after a setup
+  step they never did; it worked because something else happened to do it.
+  Silence Player now does it itself when it starts.
+- **VLC 3.0.24.** The bundled player engine is updated from 3.0.23 to 3.0.24,
+  a release with many security fixes.
+- **Starts faster, fewer antivirus false alarms.** The app is no longer one EXE
+  that unpacks itself into a temporary folder on every start; it's a normal
+  program folder.
+- If Windows doesn't allow writing next to `silenceplayer.exe` (for example in
+  Program Files), settings are saved in `%APPDATA%\SilencePlayer` instead.
+
+### For contributors
+- The code is split into a `silenceplayer/` package with one job per file
+  (see README.md, "How the code is organised"). `app.py` only starts the app.
+- GitHub Actions checks the code with ruff, runs the tests, builds the
+  installer and portable zip, and turns a pushed `v*` tag into a draft release.
+  See RELEASING.md.
+- Dependabot opens a pull request when a dependency has an update.
+- `tools/update_vlc.py` updates the bundled VLC from the official zip in one
+  command, after checking VideoLAN's published checksum.
+- The repository only keeps the 43 VLC plugins the app uses (it had all 366).
 
 ## v1.3.1
 

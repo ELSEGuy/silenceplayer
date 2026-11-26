@@ -2,6 +2,8 @@
 
 Also keeps COM (Windows' component system) set up for worker threads.
 """
+from __future__ import annotations
+
 import logging
 import os
 import sys
@@ -12,7 +14,6 @@ import psutil
 from pycaw.pycaw import IAudioMeterInformation
 
 from .logs import log, log_throttled
-
 
 OWN_PROCESSES = {"python.exe", "pythonw.exe", "py.exe", "python3.exe", "silenceplayer.exe"}
 
@@ -35,7 +36,7 @@ class PlayingApps(set):
 _MTA_COOKIE = None
 
 
-def ensure_mta():
+def ensure_mta() -> bool:
     """Keep COM's multithreaded apartment (MTA) open for the whole process.
 
     The monitor, the Mirroring Fix and the fades call the Windows audio API
@@ -85,7 +86,7 @@ def _active_session_managers():
     if cache.managers is not None and now - cache.loaded_at < DEVICE_REFRESH_SECONDS:
         return cache.managers
     import comtypes
-    from pycaw.constants import CLSID_MMDeviceEnumerator, DEVICE_STATE, EDataFlow
+    from pycaw.constants import DEVICE_STATE, CLSID_MMDeviceEnumerator, EDataFlow
     from pycaw.pycaw import IAudioSessionManager2, IMMDeviceEnumerator
     enumerator = comtypes.CoCreateInstance(CLSID_MMDeviceEnumerator, IMMDeviceEnumerator,
                                            comtypes.CLSCTX_INPROC_SERVER)
@@ -106,7 +107,7 @@ def _active_session_managers():
     return managers
 
 
-def list_sessions():
+def list_sessions() -> list:
     """Audio sessions (pycaw AudioSession) on every active output device.
 
     Raises if they can't be listed, so callers never mistake "couldn't
@@ -142,7 +143,7 @@ class ProcessNames:
         self._names = {}                 # pid → (name, when looked up)
         self._lock = threading.Lock()
 
-    def get(self, pid):
+    def get(self, pid: int) -> str | None:
         now = self._clock()
         with self._lock:
             hit = self._names.get(pid)
@@ -156,7 +157,7 @@ class ProcessNames:
             self._names[pid] = (name, now)
         return name
 
-    def forget_missing(self, live_pids):
+    def forget_missing(self, live_pids: set[int]) -> None:
         """Drop processes that no longer have an audio session (a new process
         may get the same pid later)."""
         with self._lock:
@@ -167,7 +168,7 @@ class ProcessNames:
 process_names = ProcessNames()
 
 
-def get_playing_apps(excluded=None):
+def get_playing_apps(excluded: list[str] | None = None) -> PlayingApps:
     """Names of processes currently producing audio.
 
     Raises if the session list itself can't be read: the monitor must not
@@ -206,20 +207,20 @@ def get_playing_apps(excluded=None):
     return playing
 
 
-def get_app_pids(names):
+def get_app_pids(names: set[str] | frozenset[str]) -> dict[int, str]:
     """{pid: process name} for every audio session owned by one of `names`.
 
     Raises on failure so the caller can keep its existing taps instead of
     treating a transient pycaw error as "the app went away".
     """
-    found = {}
+    found: dict[int, str] = {}
     for session in list_sessions():
         try:
             pid = session.ProcessId
             if not pid:
                 continue
             name = process_names.get(pid)
-            if name in names:
+            if name is not None and name in names:
                 found[pid] = name
         except Exception:
             continue

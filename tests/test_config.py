@@ -4,7 +4,6 @@ import sys
 
 import pytest
 
-
 # ── validation ───────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("text, fragment", [
@@ -86,7 +85,9 @@ def test_save_and_load_roundtrip(appmod, tmp_path):
 
 
 def test_save_failure_is_reported_not_raised(appmod, tmp_path):
-    path = str(tmp_path / "missing_dir" / "config.json")
+    blocker = tmp_path / "not_a_folder"
+    blocker.write_text("x")                      # a file where the folder should be
+    path = str(blocker / "config.json")
     assert appmod.save_config({"a": 1}, path) is False
 
 
