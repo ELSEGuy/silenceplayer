@@ -43,7 +43,8 @@
 - **The Mirroring Fix uses much less CPU.** It listened to each watched app by
   asking for new audio every millisecond, even when nothing played (3.3% of a
   CPU core for three watched processes, measured on Windows). It now checks
-  every 50 ms and takes everything that arrived at once, with the same audio.
+  every 20 ms and takes everything that arrived at once: 0.6-0.8%, with the
+  same audio.
 - **More reliable in the background.** The parts that watch audio run in their
   own threads, and Windows only lets those use its audio system after a setup
   step they never did; it worked because something else happened to do it.

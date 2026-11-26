@@ -26,13 +26,19 @@ if ProcessAudioCapture is not None:
         """ProcTap's per-process capture with a gentler reader thread.
 
         ProcTap's own reader asks for new audio every millisecond (measured
-        on Windows: 3.3% of a CPU core for three watched processes, even with
-        nothing playing). Windows keeps a 1-second buffer and each read
-        returns one ~10 ms packet, so this reader wakes every POLL_SECONDS,
-        empties the buffer and hands all of it to the callback in one go.
+        on Windows: 3.1-3.3% of a CPU core for three watched processes, even
+        with nothing playing). Each read returns one ~10 ms packet, so this
+        reader wakes every POLL_SECONDS, empties the buffer and hands all of
+        it to the callback in one go (measured: 0.6-0.8%, same audio).
+
+        POLL_SECONDS must stay well under ~35 ms: process-loopback capture
+        only holds that much (asking for 1 s doesn't change it), and waiting
+        50 ms lost about 40% of the audio in a test. time.sleep is used
+        because it has a precise timer on Windows, while Event.wait rounds
+        to ~15.6 ms steps.
         """
 
-        POLL_SECONDS = 0.05
+        POLL_SECONDS = 0.02
         MAX_CHUNKS = 64               # hand over at least every ~0.6 s of audio
 
         def _worker(self):
@@ -60,7 +66,7 @@ if ProcessAudioCapture is not None:
                         log_throttled(("proctap_cb", id(self)), logging.WARNING,
                                       "Audio callback failed", exc_info=True, interval=300)
                 if len(chunks) < self.MAX_CHUNKS:
-                    stop.wait(self.POLL_SECONDS)
+                    time.sleep(self.POLL_SECONDS)
 else:
     QuietCapture = None
 
