@@ -545,7 +545,9 @@ class App:
                              padx=8, pady=5, cursor="hand2",
                              activebackground=theme.PRESSED, activeforeground=color)
 
-        label(self.root, "Silence Player", size=16, bold=True, color=ACC).pack(pady=(16, 2))
+        self.title_label = label(self.root, "Silence Player", size=16, bold=True,
+                                 color=theme.BRAND)       # the icon's purple
+        self.title_label.pack(pady=(16, 2))
         label(self.root, "Plays ambient sound when your PC is silent", size=9, color=DIM).pack()
 
         tab_bar = tk.Frame(self.root, bg=BG)

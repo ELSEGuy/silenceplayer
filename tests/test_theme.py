@@ -38,3 +38,12 @@ def test_no_mocha_colours_left_in_the_ui():
     for path in ui.glob("*.py"):
         found = {c.lower() for c in re.findall(r"#[0-9a-fA-F]{6}\b", path.read_text("utf-8"))}
         assert not found & MOCHA, f"{path.name}: {sorted(found & MOCHA)}"
+
+
+def test_app_name_uses_the_icon_purple(appmod, root, cfg_path, fast_timing):
+    from conftest import make_app
+    a = make_app(appmod, root)
+    assert theme.BRAND == "#d279e5"
+    assert a.title_label.cget("text") == "Silence Player"
+    assert a.title_label.cget("fg") == theme.BRAND
+    a.monitor.stop(wait=True)

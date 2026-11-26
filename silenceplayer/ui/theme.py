@@ -36,6 +36,9 @@ BASE      = "#303446"
 MANTLE    = "#292c3c"
 CRUST     = "#232634"
 
+# ── Silence Player's own colour (not Catppuccin) ─────────────────────────────
+BRAND     = "#d279e5"   # the light purple of the app/tray icon (the ghost's body)
+
 # ── roles ────────────────────────────────────────────────────────────────────
 BG        = BASE        # window background (background pane)
 PANE      = MANTLE      # status bar along the bottom (secondary pane)

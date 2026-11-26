@@ -24,7 +24,8 @@
   softer Frappé flavour, using the official palette and Catppuccin's style
   guide for each role (Base window, Mantle status bar, Surface cards and
   controls, Base text on accent colours, Blue/Green/Yellow/Red accents). All
-  colours now live in one place (`ui/theme.py`).
+  colours now live in one place (`ui/theme.py`). The app name at the top is in the
+  light purple of Silence Player's icon.
 - **Continuous corners everywhere.** Cards, buttons, tabs, toggles, text
   fields, lists (including the selected row), sliders, the progress bar, the
   status badge and the bottom banners now have Apple-style continuous
