@@ -6,9 +6,12 @@
 - **Now playing.** A card at the top of the Player tab shows the file that is
   playing, its time and progress, and what Silence Player is doing: playing,
   ducked (and for which app), waiting for silence (with the countdown), or
-  off. Hovering the tray icon shows the same in its tooltip, and the tray menu
-  starts with a line saying what's playing. The window is a little taller to
-  make room.
+  off. Hovering the tray icon shows the same in its tooltip. The window is a
+  little taller to make room.
+- **New tray menu.** Right-clicking the tray icon opens a dark menu in Silence
+  Player's own style, headed by what's playing (green), ducked (yellow) or
+  waiting for silence, and updating live while it's open. Rounded corners on
+  Windows 11.
 - **Update notice.** Silence Player checks GitHub for a newer stable release
   shortly after it starts and every 6 hours. When there is one, a bar offers
   **Download** (opens the release page), **Skip this version** or **Later**, and

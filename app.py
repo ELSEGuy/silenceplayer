@@ -2252,7 +2252,9 @@ class NowPlaying(NamedTuple):
     detail: str         # time, countdown or reason
     progress: float     # 0..1, or None for no bar
     tooltip: str        # tray icon tooltip
-    menu: str           # first (greyed) line of the tray menu
+    menu: str           # first (greyed) line of the plain Windows tray menu (fallback)
+    menu_head: str = "" # Silence Player's own tray menu: small coloured line...
+    menu_line: str = "" # ...and the line under it
 
 
 def format_clock(seconds):
@@ -2300,35 +2302,223 @@ def describe_now_playing(monitoring, info, track, config):
             return f"{format_clock(track.position)} / {format_clock(track.length)}", frac
         return format_clock(track.position), None
 
+    def head(text):
+        return _shorten(text, TRAY_MENU_MAX)
+
     if not monitoring:
         return NowPlaying("Off", "off", name, "Monitoring is off", None,
-                          tip("Monitoring is off"), "Monitoring is off")
+                          tip("Monitoring is off"), "Monitoring is off",
+                          "Monitoring is off", head(name))
     phase = info.phase if info is not None else "starting"
 
     if phase == "playing":
         detail, bar = clock_and_bar()
         return NowPlaying("Playing", "playing", name, detail, bar,
-                          tip(f"Playing: {name}"), menu("Playing: "))
+                          tip(f"Playing: {name}"), menu("Playing: "),
+                          "Now playing", head(name))
     if phase == "ducked":
         clock, bar = clock_and_bar()
         if info.apps:
             why = f"{_apps_text(info.apps)} is playing"
+            menu_head = f"Ducked to {info.duck_percent}% for {_apps_text(info.apps)}"
         elif info.remaining is not None:
-            why = f"back to full volume in {math.ceil(info.remaining)}s"
+            secs = math.ceil(info.remaining)
+            why = f"back to full volume in {secs}s"
+            menu_head = f"Ducked to {info.duck_percent}%, back up in {secs}s"
         else:
             why = "another app is playing"
+            menu_head = f"Ducked to {info.duck_percent}%"
         return NowPlaying(f"Ducked {info.duck_percent}%", "ducked", name, f"{clock} · {why}",
-                          bar, tip(f"Quieter: {name}"), menu("Quieter: "))
+                          bar, tip(f"Quieter: {name}"), menu("Quieter: "),
+                          head(menu_head), head(name))
     if phase == "audio":
         apps = _apps_text(info.apps)
         return NowPlaying("Waiting", "waiting", name, f"{apps} is playing", None,
-                          tip(f"Waiting: {apps} is playing"), "Waiting for silence")
+                          tip(f"Waiting: {apps} is playing"), "Waiting for silence",
+                          "Waiting for silence", head(f"{apps} is playing"))
     if phase == "waiting" and info.remaining is not None:
         secs = max(1, math.ceil(info.remaining))
         return NowPlaying("Waiting", "waiting", name, f"Plays in {secs}s if it stays silent",
-                          None, tip(f"Ambient in {secs}s"), "Waiting for silence")
+                          None, tip(f"Ambient in {secs}s"), "Waiting for silence",
+                          "Waiting for silence", f"Ambient starts in {secs}s")
     return NowPlaying("Waiting", "waiting", name, "Listening…", None,
-                      tip("Listening…"), "Waiting for silence")
+                      tip("Listening…"), "Waiting for silence",
+                      "Waiting for silence", "Listening…")
+
+
+def make_tray_icon(name, image, title, menu, on_right_click=None):
+    """A pystray icon whose right-click opens Silence Player's own menu.
+
+    Windows draws the standard tray menu itself (no colours, no two-line
+    header), so a right-click calls `on_right_click` instead. Left-click and
+    the rest are pystray's. If `on_right_click` fails, the standard menu built
+    from `menu` is shown, so the tray never becomes unusable.
+    """
+    base = pystray.Icon
+
+    class TrayIcon(base):
+        WM_RBUTTONUP = 0x0205
+
+        def _on_notify(self, wparam, lparam):
+            if on_right_click is not None and lparam == self.WM_RBUTTONUP:
+                try:
+                    on_right_click()
+                    return None
+                except Exception:
+                    log.exception("Custom tray menu failed; showing the Windows menu")
+            return super()._on_notify(wparam, lparam)
+
+    return TrayIcon(name, image, title, menu)
+
+
+def round_window_corners(win, border="#3d3d3d"):
+    """Windows 11: small rounded corners and a border colour, like system menus.
+    Does nothing on Windows 10 or other systems."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        user32, dwm = ctypes.windll.user32, ctypes.windll.dwmapi
+        hwnd = user32.GetAncestor(win.winfo_id(), 2)          # GA_ROOT
+        corner = ctypes.c_int(3)                                # DWMWCP_ROUNDSMALL
+        dwm.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(corner), ctypes.sizeof(corner))
+        r, g, b = (int(border[i:i + 2], 16) for i in (1, 3, 5))
+        color = ctypes.c_uint(r | (g << 8) | (b << 16))         # COLORREF
+        dwm.DwmSetWindowAttribute(hwnd, 34, ctypes.byref(color), ctypes.sizeof(color))
+    except Exception:
+        log.debug("Could not round the menu corners", exc_info=True)
+
+
+class TrayMenu:
+    """Silence Player's own right-click menu for the tray icon.
+
+    A borderless Tk window: dark, rounded on Windows 11, with a coloured
+    "Now playing" header. It closes when an item is picked, on Escape, when it
+    loses focus, or when the mouse is clicked anywhere outside it.
+    """
+
+    BG, BORDER, FG, HOVER, SEP = "#2c2c2c", "#3d3d3d", "#f0f0f0", "#383838", "#3d3d3d"
+    HEAD_COLORS = {"playing": "#a6e3a1", "ducked": "#f9e2af",
+                   "waiting": "#9a9a9a", "off": "#9a9a9a"}
+    MIN_WIDTH = 230
+    POLL_MS = 40
+
+    def __init__(self, root):
+        self.root = root
+        self.win = None
+        self._head = self._line = None
+
+    @property
+    def is_open(self):
+        return self.win is not None
+
+    def show(self, head, line, kind, items, at=None):
+        """items: (text, callback) tuples, or None for a separator."""
+        self.close()
+        win = tk.Toplevel(self.root, bg=self.BORDER)
+        win.withdraw()
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        self.win = win
+        body = tk.Frame(win, bg=self.BG, padx=5, pady=5)
+        body.pack(fill="both", expand=True, padx=1, pady=1)
+
+        header = tk.Frame(body, bg=self.BG, padx=10, pady=6)
+        header.pack(fill="x")
+        self._head = tk.Label(header, bg=self.BG, font=("Segoe UI", 9), anchor="w")
+        self._head.pack(fill="x")
+        self._line = tk.Label(header, bg=self.BG, fg=self.FG, font=("Segoe UI", 10),
+                              anchor="w")
+        self._line.pack(fill="x")
+        self.update_header(head, line, kind)
+        self._separator(body)
+
+        for item in items:
+            if item is None:
+                self._separator(body)
+                continue
+            text, callback = item
+            lbl = tk.Label(body, text=text, bg=self.BG, fg=self.FG, font=("Segoe UI", 10),
+                           anchor="w", padx=10, pady=5, cursor="hand2")
+            lbl.pack(fill="x")
+            lbl.bind("<Enter>", lambda e, w=lbl: w.config(bg=self.HOVER))
+            lbl.bind("<Leave>", lambda e, w=lbl: w.config(bg=self.BG))
+            lbl.bind("<ButtonRelease-1>", lambda e, cb=callback: self._pick(cb))
+
+        win.update_idletasks()
+        w = max(self.MIN_WIDTH, win.winfo_reqwidth())
+        h = win.winfo_reqheight()
+        px, py = at if at is not None else self.root.winfo_pointerxy()
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        # Like the Windows menu: open up and to the left of the pointer when
+        # there's no room below/right of it (the taskbar is usually at the bottom).
+        x = px - w if px + w > sw else px
+        y = py - h if py + h > sh else py
+        win.geometry(f"{w}x{h}+{max(0, x)}+{max(0, y)}")
+        win.deiconify()
+        round_window_corners(win, self.BORDER)
+        win.lift()
+        win.focus_force()
+        win.bind("<Escape>", lambda e: self.close())
+        win.bind("<FocusOut>", lambda e: self.root.after(60, self._close_if_unfocused))
+        self.root.after(self.POLL_MS, self._watch_clicks)
+
+    def _separator(self, parent):
+        tk.Frame(parent, bg=self.SEP, height=1).pack(fill="x", pady=4)
+
+    def update_header(self, head, line, kind):
+        if self.win is None:
+            return
+        self._head.config(text=head, fg=self.HEAD_COLORS.get(kind, "#9a9a9a"))
+        self._line.config(text=line)
+
+    def _pick(self, callback):
+        self.close()
+        try:
+            callback()
+        except Exception:
+            log.exception("Tray menu action failed")
+
+    def _close_if_unfocused(self):
+        win = self.win
+        if win is None:
+            return
+        try:
+            focus = win.focus_displayof()
+            keep = focus is not None and focus.winfo_toplevel() is win
+        except Exception:
+            keep = False
+        if not keep:
+            self.close()
+
+    def _watch_clicks(self):
+        """Close on a click outside the menu (works even without keyboard focus)."""
+        win = self.win
+        if win is None:
+            return
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                state = ctypes.windll.user32.GetAsyncKeyState
+                pressed = any(state(vk) & 0x8000 for vk in (0x01, 0x02, 0x04))
+                if pressed:
+                    px, py = win.winfo_pointerxy()
+                    x0, y0 = win.winfo_rootx(), win.winfo_rooty()
+                    inside = x0 <= px < x0 + win.winfo_width() and y0 <= py < y0 + win.winfo_height()
+                    if not inside:
+                        self.close()
+                        return
+            except Exception:
+                log.debug("Tray menu click watch failed", exc_info=True)
+        self.root.after(self.POLL_MS, self._watch_clicks)
+
+    def close(self):
+        win, self.win = self.win, None
+        if win is not None:
+            try:
+                win.destroy()
+            except Exception:
+                pass
 
 
 class MarqueeLabel(tk.Canvas):
@@ -2517,6 +2707,7 @@ class App:
         if self._version != APP_VERSION:
             log.warning("Pretending to be version %s to test the update notice", self._version)
         self._now = None                # last NowPlaying shown
+        self._tray_menu = None          # created with the UI
         self._tray_tip = None
         self._update_info  = None       # a newer release, while one is known
         self._update_later = set()      # tags the user said "Later" to (this session)
@@ -2828,7 +3019,8 @@ class App:
                 pystray.MenuItem("Quit", self._tray_quit),
             )
             tip = self._now.tooltip if self._now else "Silence Player"
-            self.tray = pystray.Icon("SilencePlayer", icon_image, tip, menu)
+            self.tray = make_tray_icon("SilencePlayer", icon_image, tip, menu,
+                                       on_right_click=lambda: self.call_in_ui(self._open_tray_menu))
             self._tray_tip = tip
             self.tray.run()
         except Exception:
@@ -2846,6 +3038,19 @@ class App:
 
     def _tray_open(self, icon=None, item=None):
         self.call_in_ui(self._show_window)
+
+    def _open_tray_menu(self, at=None):
+        if self._tray_menu is None:
+            self._tray_menu = TrayMenu(self.root)
+        now = self._now or describe_now_playing(self.monitoring, self.monitor.info,
+                                                self.player.track_info(), self.config)
+        items = [("Open Settings", self._show_window)]
+        if self._update_info is not None:
+            items.append((f"Download v{self._update_info.version}", self._open_update))
+        items.append(("Stop Monitoring" if self.monitoring else "Start Monitoring",
+                      self._toggle_monitoring))
+        items += [None, ("Quit", self._quit)]
+        self._tray_menu.show(now.menu_head, now.menu_line, now.kind, items, at=at)
 
     def _tray_update(self, icon=None, item=None):
         self.call_in_ui(self._open_update)
@@ -2878,6 +3083,8 @@ class App:
         self.root.withdraw()
 
         self.updater.stop()
+        if self._tray_menu is not None:
+            self._tray_menu.close()
 
         def shutdown():
             try:
@@ -3309,6 +3516,8 @@ class App:
         self.np_title.set_fg(title_fg)
         self.np_detail.config(text=now.detail)
         self._draw_np_bar()
+        if self._tray_menu is not None and self._tray_menu.is_open:
+            self._tray_menu.update_header(now.menu_head, now.menu_line, now.kind)
         tray = self.tray
         if tray is not None:
             if now.tooltip != self._tray_tip:
