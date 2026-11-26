@@ -25,14 +25,14 @@ if ProcessAudioCapture is not None:
     class QuietCapture(ProcessAudioCapture):
         """ProcTap's per-process capture with a gentler reader thread.
 
-        ProcTap's own reader asks for new audio every millisecond, about
-        2% of a CPU core per watched app even when nothing plays. Windows
-        keeps a 1-second buffer, and each read returns one ~10 ms packet, so
-        this reader wakes every POLL_SECONDS, empties the buffer and hands
-        all of it to the callback in one go.
+        ProcTap's own reader asks for new audio every millisecond (measured
+        on Windows: 3.3% of a CPU core for three watched processes, even with
+        nothing playing). Windows keeps a 1-second buffer and each read
+        returns one ~10 ms packet, so this reader wakes every POLL_SECONDS,
+        empties the buffer and hands all of it to the callback in one go.
         """
 
-        POLL_SECONDS = 0.02
+        POLL_SECONDS = 0.05
         MAX_CHUNKS = 64               # hand over at least every ~0.6 s of audio
 
         def _worker(self):

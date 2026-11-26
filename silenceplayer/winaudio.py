@@ -17,6 +17,17 @@ from .logs import log, log_throttled
 
 OWN_PROCESSES = {"python.exe", "pythonw.exe", "py.exe", "python3.exe", "silenceplayer.exe"}
 
+# Audio routing apps: other apps play into their virtual device and they play
+# the result on your real speakers or headset. Their own session only carries
+# other apps' sound (our ambient sound too), and those apps are already seen
+# on the virtual device, so routers are never counted as playing.
+AUDIO_ROUTERS = {
+    "nvidia broadcast.exe", "nvidia rtx voice.exe",
+    "voicemeeter.exe", "voicemeeter_x64.exe", "voicemeeterpro.exe", "voicemeeterpro_x64.exe",
+    "voicemeeter8.exe", "voicemeeter8x64.exe",
+    "steelseriessonar.exe", "wavelink.exe", "fxsound.exe", "krisp.exe", "boom3d.exe",
+}
+
 
 class PlayingApps(set):
     """Names of the apps producing sound right now.
@@ -190,7 +201,7 @@ def get_playing_apps(excluded: list[str] | None = None) -> PlayingApps:
             if pid == own_pid:
                 continue
             name = process_names.get(pid)
-            if name is None or name in OWN_PROCESSES:
+            if name is None or name in OWN_PROCESSES or name in AUDIO_ROUTERS:
                 continue
             meter = session._ctl.QueryInterface(IAudioMeterInformation)
             peak = meter.GetPeakValue()

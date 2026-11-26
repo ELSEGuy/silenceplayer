@@ -440,3 +440,18 @@ def test_get_playing_apps_reports_audible_excluded_apps(appmod, monkeypatch):
     result = appmod.get_playing_apps(["spotify.exe", "vlc.exe"])
     assert result == {"discord.exe"}
     assert result.excluded_audible == {"spotify.exe"}
+
+
+def test_audio_routing_apps_are_not_counted(appmod, monkeypatch):
+    """NVIDIA Broadcast & co. re-play other apps' sound (ours too) on the real
+    device. The apps behind them are seen directly, so routers are ignored."""
+    import os
+    base = os.getpid()
+    fake_sessions(monkeypatch, appmod, [
+        (base + 1, "nvidia broadcast.exe", 0.4),   # replaying our ambient sound
+        (base + 2, "voicemeeter8x64.exe", 0.4),
+        (base + 3, "spotify.exe", 0.3),            # an app playing into the virtual device
+    ])
+    result = appmod.get_playing_apps([])
+    assert result == {"spotify.exe"}
+    assert result.excluded_audible == set()
