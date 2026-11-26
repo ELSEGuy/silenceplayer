@@ -859,7 +859,12 @@ class MirrorFix:
     tap is still warming up) it answers True, i.e. the app counts as playing.
     """
 
-    REAL_AUDIO_THRESHOLD = 0.001
+    # An app that only mirrors renders nothing: its tap reads exact digital
+    # silence (0.0000 in real logs). A stream played at low volume reads
+    # 0.0004-0.0016, so a threshold of 0.001 (the level pycaw's *peak* meter
+    # uses) cut right through it and the verdict flipped back and forth.
+    # Anything clearly above zero is real sound.
+    REAL_AUDIO_THRESHOLD = 0.0001
     WINDOW_SIZE          = 256    # enough chunks to cover STALE_AFTER_SECONDS
     MIN_SAMPLES          = 3      # samples needed to judge a tap during warm-up
     WARMUP_SECONDS       = 2.0    # a new tap counts as "unknown" (→ real) at most this long
@@ -1045,7 +1050,7 @@ class MirrorFix:
         for st in taps:
             fresh = [rms for (t, rms) in st.samples if now - t <= self.STALE_AFTER_SECONDS]
             loudest = max(fresh) if fresh else 0.0
-            parts.append(f"PID {st.pid}: {len(fresh)} chunks, loudest {loudest:.4f}")
+            parts.append(f"PID {st.pid}: {len(fresh)} chunks, loudest {loudest:.5f}")
         return "; ".join(parts) if parts else "no taps"
 
     def is_real_audio(self, name):

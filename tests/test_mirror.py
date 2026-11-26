@@ -279,3 +279,34 @@ def test_verdict_log_includes_levels(fix_env, appmod):
         appmod.log.removeHandler(handler)
     text = " ".join(records)
     assert "mirroring only" in text and "PID 111" in text and "loudest" in text
+
+
+def test_quiet_stream_is_real_but_digital_silence_is_mirroring(fix_env):
+    """From a real log: a stream at low volume reads 0.0004-0.0016, while an app
+    that only mirrors reads exactly 0. The threshold must separate those."""
+    fix, clock, pids = fix_env
+    fix._sync_taps()
+    tap = FakeTap.instances[0]
+    clock.t += 3
+    for level in (0.0004, 0.0009, 0.0006, 0.0012, 0.0005):
+        tap.feed(level)
+        clock.t += 0.2
+        assert fix.is_real_audio("discord.exe") is True, level
+    clock.t += fix.STALE_AFTER_SECONDS + 0.1
+    for _ in range(20):
+        tap.feed(0.0)
+    assert fix.is_real_audio("discord.exe") is False
+
+
+def test_quiet_audio_keeps_the_verdict_steady(fix_env):
+    """Chunk levels hovering around the old 0.001 limit must not flip the verdict."""
+    fix, clock, pids = fix_env
+    fix._sync_taps()
+    tap = FakeTap.instances[0]
+    clock.t += 3
+    verdicts = set()
+    for i in range(200):                        # 4 seconds of quiet, uneven sound
+        tap.feed(0.0008 if i % 3 else 0.0003)
+        clock.t += 0.02
+        verdicts.add(fix.is_real_audio("discord.exe"))
+    assert verdicts == {True}

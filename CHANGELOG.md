@@ -9,9 +9,12 @@
   playing. The Mirroring Fix is now only used when there is something for an
   app to mirror: your ambient sound, or an excluded app that is playing. In
   every other case Discord's sound counts as real audio.
-- **Quiet or bursty audio could be mistaken for "mirroring only".** The Mirroring
-  Fix now looks at the loudest sound in the last two seconds instead of an
-  average of the last few moments.
+- **Quiet audio could be mistaken for "mirroring only".** A stream played at low
+  volume sat right on the Mirroring Fix's cutoff, so Discord flipped between
+  "real" and "just mirroring" and the countdown kept running while you were
+  listening. An app that only mirrors renders exact silence, so the cutoff is
+  now just above zero, and the Mirroring Fix looks at the loudest sound of the
+  last two seconds instead of an average.
 - The log now shows what the Mirroring Fix heard (per process) whenever it
   changes its mind about an app, which makes problems like this easier to track
   down.
