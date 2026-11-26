@@ -38,8 +38,17 @@ from ..ui.widgets import MarqueeLabel
 from ..updates import RELEASES_URL, UpdateChecker, current_version
 
 
+def snap_to_step(value, step):
+    """Round a 0-100 setting to the nearest slider step (halves go up), so the
+    slider and the level in use always agree. 47 → 45, 55 → 60 with step 10."""
+    value = max(0, min(100, int(value)))
+    return min(100, int(value / step + 0.5) * step)
+
+
 class App:
     WINDOW_W, WINDOW_H = 520, 770
+    VOLUME_STEP = 5                # the volume slider moves 0, 5, 10 … 100
+    DUCK_STEP = 10                 # the duck slider: 0 (stop), 10 … 90, 100 (keep playing)
     UI_POLL_MS = 50
 
     def __init__(self, root, instance=None, config_notice=None, config=None):
@@ -801,7 +810,9 @@ class App:
         label(duck_card, "0% = Stop ambient   |   1-99% = Duck volume   |   100% = Keep playing",
               size=8, color=DIM).pack(anchor="w", pady=(2, 6))
 
-        self.duck_var = tk.IntVar(value=int(self.config.get("duck_percent", 0)))
+        self.config["duck_percent"] = snap_to_step(self.config.get("duck_percent", 0),
+                                                   self.DUCK_STEP)
+        self.duck_var = tk.IntVar(value=self.config["duck_percent"])
 
         def on_duck_change(val):
             v = int(float(val))
@@ -818,6 +829,7 @@ class App:
 
         tk.Scale(duck_card, from_=0, to=100, orient="horizontal",
                  variable=self.duck_var, command=on_duck_change,
+                 resolution=self.DUCK_STEP,
                  bg=CARD, fg=FG, troughcolor=BTN_BG,
                  highlightthickness=0, sliderrelief="flat",
                  length=460, showvalue=False).pack(fill="x")
@@ -885,9 +897,12 @@ class App:
         self.np_vol_label = tk.Label(vol_row, bg=CARD, fg=DIM, font=("Segoe UI", 9),
                                      width=4, anchor="e")
         self.np_vol_label.pack(side="right")
-        self.np_vol_var = tk.IntVar(value=int(self.config.get("max_volume", 50)))
+        self.config["max_volume"] = snap_to_step(self.config.get("max_volume", 50),
+                                                 self.VOLUME_STEP)
+        self.np_vol_var = tk.IntVar(value=self.config["max_volume"])
         self.np_vol = tk.Scale(vol_row, from_=0, to=100, orient="horizontal",
                                variable=self.np_vol_var, command=self._np_volume_changed,
+                               resolution=self.VOLUME_STEP,
                                bg=CARD, fg=FG, troughcolor=BTN_BG, activebackground=ACC,
                                highlightthickness=0, sliderrelief="flat", showvalue=False,
                                sliderlength=14, width=8, bd=0, cursor="hand2")

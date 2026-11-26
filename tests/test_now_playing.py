@@ -411,14 +411,14 @@ def test_volume_and_duck_apply_live(appmod, root, cfg_path, fast_timing, monkeyp
     assert calls[-1] == ("level", 40)
 
     a.monitor.info = appmod.MonitorInfo("ducked", apps=("discord.exe",), duck_percent=50)
-    a.duck_var.set(25)
-    a._on_duck_change(25)
-    assert a.config["duck_percent"] == 25
-    assert calls[-1] == ("level", 10)     # 25% of 40
+    a.duck_var.set(30)
+    a._on_duck_change(30)
+    assert a.config["duck_percent"] == 30
+    assert calls[-1] == ("level", 12)     # 30% of 40
 
     a.np_vol.set(80)
     pump(root, 0.05)
-    assert calls[-1] == ("level", 20)     # still ducked: 25% of 80
+    assert calls[-1] == ("level", 24)     # still ducked: 30% of 80
     assert not cfg_path.exists(), "live changes are not saved until Save Settings"
     a.monitor.stop(wait=True)
 
@@ -437,3 +437,31 @@ def test_keep_playing_100_shows_playing(appmod, cfg):
     # anything below 100% is still a real duck
     assert describe(appmod, cfg, "ducked", track, duck_percent=99,
                     apps=("discord.exe",)).badge == "Ducked 99%"
+
+
+
+@pytest.mark.parametrize("value, step, snapped", [
+    (47, 5, 45), (48, 5, 50), (50, 5, 50), (0, 5, 0), (100, 5, 100), (99, 5, 100),
+    (55, 10, 60), (54, 10, 50), (5, 10, 10), (4, 10, 0), (95, 10, 100), (150, 10, 100),
+    (-3, 10, 0),
+])
+def test_snap_to_step(appmod, value, step, snapped):
+    assert appmod.snap_to_step(value, step) == snapped
+
+
+def test_sliders_move_in_steps(appmod, root, cfg_path, fast_timing, monkeypatch):
+    import json
+    cfg_path.write_text(json.dumps({"max_volume": 47, "duck_percent": 55}))
+    a = make_app(appmod, root)
+    # saved values off the steps are rounded so the sliders match what is used
+    assert a.config["max_volume"] == 45 and a.np_vol_var.get() == 45
+    assert a.np_vol_label.cget("text") == "45%"
+    assert a.config["duck_percent"] == 60 and a.duck_var.get() == 60
+    assert a.duck_label.cget("text") == "Duck to 60%"
+
+    a.np_vol.set(63)
+    pump(root, 0.05)
+    assert a.config["max_volume"] == 65 and a.np_vol_label.cget("text") == "65%"
+    assert a.np_vol.cget("resolution") == 5
+    assert float(str(a.duck_var.get())) % 10 == 0
+    a.monitor.stop(wait=True)
