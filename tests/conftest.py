@@ -260,6 +260,15 @@ def appmod():
     return app_module
 
 
+@pytest.fixture(autouse=True)
+def _no_real_registry(monkeypatch):
+    """Tests must never change the real Start with Windows entry (CI runs on
+    Windows). Tests that need a registry patch in their own fake on top."""
+    def unavailable():
+        raise ImportError("registry disabled in tests")
+    monkeypatch.setattr(app_module, "_WinRegistry", unavailable)
+
+
 @pytest.fixture
 def fast_timing(monkeypatch):
     """Short fades and polls so threading tests run quickly."""

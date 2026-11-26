@@ -247,3 +247,88 @@ def test_marquee_without_animations_uses_ellipsis(appmod, root):
     pump(root, 0.05)
     shown = m.itemcget(m._items[0], "text")
     assert not m.scrolling and shown.endswith("…") and len(shown) < len(var.get())
+
+
+# ── Start with Windows ───────────────────────────────────────────────────────
+
+class _UiRegistry:
+    store = {}
+    fail = False
+
+    def get(self, path, name):
+        return self.store.get((path, name))
+
+    def set(self, path, name, value):
+        if self.fail:
+            raise PermissionError("denied")
+        self.store[(path, name)] = value
+
+    def delete(self, path, name):
+        if self.fail:
+            raise PermissionError("denied")
+        self.store.pop((path, name), None)
+
+
+@pytest.fixture
+def fake_registry(appmod, monkeypatch):
+    _UiRegistry.store = {}
+    _UiRegistry.fail = False
+    monkeypatch.setattr(appmod, "_WinRegistry", _UiRegistry)
+    return _UiRegistry
+
+
+def _run_value(appmod, reg):
+    return reg.store.get((appmod.StartupEntry.RUN_KEY, appmod.StartupEntry.VALUE_NAME))
+
+
+def test_start_with_windows_is_only_written_by_save_settings(appmod, root, cfg_path,
+                                                             fake_registry, fast_timing):
+    a = make_app(appmod, root)
+    assert a.startup_btn.cget("text") == "Disabled" and not a.startup_var.get()
+    a._toggle_startup_choice()
+    assert a.startup_btn.cget("text") == "Enabled"
+    assert _run_value(appmod, fake_registry) is None, "toggling alone must not change Windows"
+    a._on_window_close()
+    assert _run_value(appmod, fake_registry) is None, "closing must not change it either"
+    a._show_window()
+    a._save_settings()
+    assert _run_value(appmod, fake_registry) == appmod.startup_command()
+    pump(root, 0.1)                       # status arrives via the UI queue
+    assert a.status_var.get() == "Settings saved!"
+    a._toggle_startup_choice()
+    a._save_settings()
+    assert _run_value(appmod, fake_registry) is None
+    a.monitor.stop(wait=True)
+
+
+def test_checkbox_reflects_an_existing_entry(appmod, root, cfg_path, fake_registry, fast_timing):
+    fake_registry.store[(appmod.StartupEntry.RUN_KEY, appmod.StartupEntry.VALUE_NAME)] = '"x.exe"'
+    a = make_app(appmod, root)
+    assert a.startup_var.get() and a.startup_btn.cget("text") == "Enabled"
+    a.monitor.stop(wait=True)
+
+
+def test_start_with_windows_failure_is_reported_and_reverted(appmod, root, cfg_path,
+                                                              fake_registry, fast_timing):
+    a = make_app(appmod, root)
+    a._toggle_startup_choice()
+    fake_registry.fail = True
+    a._save_settings()
+    pump(root, 0.1)                       # status arrives via the UI queue
+    assert "Start with Windows could not be changed" in a.status_var.get()
+    assert not a.startup_var.get() and a.startup_btn.cget("text") == "Disabled"
+    assert cfg_path.exists(), "the other settings are still saved"
+    a.monitor.stop(wait=True)
+
+
+def test_start_with_windows_unavailable_off_windows(appmod, root, cfg_path, monkeypatch,
+                                                    fast_timing):
+    def no_winreg():
+        raise ImportError("winreg")
+
+    monkeypatch.setattr(appmod, "_WinRegistry", no_winreg)
+    a = make_app(appmod, root)
+    assert a.startup_btn.cget("state") == "disabled"
+    a._toggle_startup_choice()
+    assert not a.startup_var.get()
+    a.monitor.stop(wait=True)

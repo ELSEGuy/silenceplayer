@@ -22,7 +22,7 @@ import pystray
 from PIL import Image, ImageDraw, ImageTk
 
 APP_NAME    = "SilencePlayer"
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.4.0-dev"
 
 log = logging.getLogger("silenceplayer")
 
@@ -207,6 +207,13 @@ MIRROR_DEFAULTS = [
      "medal.exe",                # Medal clip recorder
      "rainmeter.exe",            # Rainmeter audio-visualizer skins
      "icue.exe"],                # Corsair iCUE audio-reactive lighting
+    # v3: more streaming software and audio-reactive apps
+    ["xsplit.core.exe",          # XSplit Broadcaster
+     "xsplit.gamecaster.exe",    # XSplit Gamecaster (older)
+     "lively.exe",               # Lively Wallpaper (audio-reactive wallpapers)
+     "lively.playerwebview2.exe",   # Lively's wallpaper players
+     "lively.playercefsharp.exe",
+     "fluentflyout.exe"],        # FluentFlyout (media flyout / audio visualizer)
 ]
 MIRROR_DEFAULTS_VERSION = len(MIRROR_DEFAULTS)
 
@@ -818,6 +825,126 @@ class SingleInstance:
                 except Exception:
                     pass
                 setattr(self, attr, None)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Start with Windows
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _WinRegistry:
+    """String values under HKEY_CURRENT_USER. Windows only (needs winreg)."""
+
+    def __init__(self):
+        import winreg                      # ImportError off Windows
+        self._w = winreg
+
+    def get(self, path, name):
+        """The value (str or bytes), or None if the key or value doesn't exist."""
+        w = self._w
+        try:
+            with w.OpenKey(w.HKEY_CURRENT_USER, path, 0, w.KEY_READ) as key:
+                return w.QueryValueEx(key, name)[0]
+        except FileNotFoundError:
+            return None
+
+    def set(self, path, name, value):
+        w = self._w
+        with w.CreateKeyEx(w.HKEY_CURRENT_USER, path, 0, w.KEY_SET_VALUE) as key:
+            w.SetValueEx(key, name, 0, w.REG_SZ, value)
+
+    def delete(self, path, name):
+        w = self._w
+        try:
+            with w.OpenKey(w.HKEY_CURRENT_USER, path, 0, w.KEY_SET_VALUE) as key:
+                w.DeleteValue(key, name)
+        except FileNotFoundError:
+            pass
+
+
+def startup_command():
+    """The command line Windows should run at sign-in."""
+    exe = sys.executable
+    if hasattr(sys, "_MEIPASS"):                 # the packaged EXE
+        return f'"{exe}"'
+    # Running from source: use pythonw so no console window opens.
+    pythonw = os.path.join(os.path.dirname(exe), "pythonw.exe")
+    if os.path.basename(exe).lower() == "python.exe" and os.path.isfile(pythonw):
+        exe = pythonw
+    return f'"{exe}" "{os.path.abspath(__file__)}"'
+
+
+class StartupEntry:
+    """Turns "start with Windows" on and off (the per-user Run registry key).
+
+    No admin rights needed, and it only affects the current Windows user.
+    Windows also lets people switch startup apps off in Settings → Apps →
+    Startup or Task Manager; that is stored separately (StartupApproved) and
+    wins over the Run entry, so it is respected when reading and cleared when
+    the user turns the option on again here.
+    """
+
+    RUN_KEY      = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    APPROVED_KEY = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+    VALUE_NAME   = "SilencePlayer"
+
+    def __init__(self, registry=None, command=None):
+        if registry is None:
+            try:
+                registry = _WinRegistry()
+            except ImportError:
+                registry = None
+        self._reg = registry
+        self._command = command or startup_command
+
+    @property
+    def available(self):
+        return self._reg is not None
+
+    def _registered_command(self):
+        value = self._reg.get(self.RUN_KEY, self.VALUE_NAME)
+        return value if isinstance(value, str) and value.strip() else None
+
+    def _blocked_by_windows(self):
+        """True if the user switched it off in Windows' startup settings."""
+        data = self._reg.get(self.APPROVED_KEY, self.VALUE_NAME)
+        return isinstance(data, (bytes, bytearray)) and len(data) > 0 and bool(data[0] & 1)
+
+    def status(self):
+        """'unavailable', 'off', 'on', or 'blocked' (registered, but switched off in Windows)."""
+        if not self.available:
+            return "unavailable"
+        if self._registered_command() is None:
+            return "off"
+        return "blocked" if self._blocked_by_windows() else "on"
+
+    def is_enabled(self):
+        return self.status() == "on"
+
+    def set_enabled(self, enabled):
+        """Raises OSError if Windows refuses; the caller reports it."""
+        if not self.available:
+            raise OSError("Start with Windows is only available on Windows")
+        if enabled:
+            self._reg.set(self.RUN_KEY, self.VALUE_NAME, self._command())
+            self._reg.delete(self.APPROVED_KEY, self.VALUE_NAME)   # clear a "disabled" mark
+            log.info("Start with Windows: on (%s)", self._command())
+        else:
+            self._reg.delete(self.RUN_KEY, self.VALUE_NAME)
+            self._reg.delete(self.APPROVED_KEY, self.VALUE_NAME)
+            log.info("Start with Windows: off")
+
+    def repair_path(self):
+        """If the packaged EXE was moved or replaced, point the entry at its new
+        location so Start with Windows keeps working. Returns True if changed."""
+        if not self.available or not hasattr(sys, "_MEIPASS"):
+            return False
+        registered = self._registered_command()
+        wanted = self._command()
+        if registered is None or registered == wanted:
+            return False
+        self._reg.set(self.RUN_KEY, self.VALUE_NAME, wanted)
+        log.info("Start with Windows: updated the path (%s → %s)", registered, wanted)
+        return True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2042,6 +2169,11 @@ class App:
         self._status     = "Ready."
         self.tray        = None
         self.instance    = instance
+        self._startup    = StartupEntry()
+        try:
+            self._startup.repair_path()
+        except Exception:
+            log.warning("Could not check the Start with Windows entry", exc_info=True)
 
         self._build_ui()
         self.root.after(self.UI_POLL_MS, self._drain_ui_queue)
@@ -2400,13 +2532,21 @@ class App:
                   bg=BTN_BG, fg=DIM, relief="flat", font=("Segoe UI", 9, "bold"),
                   padx=10, pady=3, cursor="hand2").pack(side="left", padx=(6, 0))
 
+        # Version number, tucked away bottom-left (handy for bug reports). The
+        # status text keeps clear of it on both sides, however long it is.
+        version_text = f"v{APP_VERSION}"
+        try:
+            version_w = tkfont.Font(root=self.root, family="Segoe UI", size=8).measure(version_text)
+        except Exception:
+            version_w = 7 * len(version_text)
+        side_pad = max(52, version_w + 20)
         self.status_var = tk.StringVar(value=self._status)
         self.status_label = tk.Label(status_frame, textvariable=self.status_var,
-                                     bg="#181825", fg=DIM,
-                                     font=("Segoe UI", 9), pady=8, padx=52, wraplength=400)
+                                     bg="#181825", fg=DIM, font=("Segoe UI", 9), pady=8,
+                                     padx=side_pad,
+                                     wraplength=max(240, self.WINDOW_W - 2 * side_pad - 16))
         self.status_label.pack(fill="x")
-        # Version number, tucked away bottom-left (handy for bug reports).
-        tk.Label(status_frame, text=f"v{APP_VERSION}", bg="#181825", fg="#585b70",
+        tk.Label(status_frame, text=version_text, bg="#181825", fg="#585b70",
                  font=("Segoe UI", 8)).place(in_=self.status_label, relx=0, rely=0.5,
                                              x=10, anchor="w")
 
@@ -2560,6 +2700,19 @@ class App:
         fade_btn.pack(side="left")
         toggle_fade()
 
+        startup_row = tk.Frame(shared_card, bg=CARD)
+        startup_row.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        label(startup_row, "Start with Windows", bold=True, color=FG).pack(side="left", padx=(0, 12))
+
+        self.startup_var = tk.BooleanVar(value=self._startup.is_enabled())
+        self.startup_btn = tk.Button(startup_row, command=self._toggle_startup_choice,
+                                     relief="flat", font=("Segoe UI", 9, "bold"),
+                                     padx=12, pady=4, cursor="hand2")
+        self.startup_btn.pack(side="left")
+        self.startup_hint = label(shared_card, "", size=8, color=DIM)
+        self.startup_hint.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self._refresh_startup_ui()
+
         duck_card = tk.Frame(parent, bg=CARD, padx=16, pady=12)
         duck_card.pack(fill="x", padx=24, pady=4)
 
@@ -2599,6 +2752,49 @@ class App:
 
         _refresh_mode()
         self._refresh_path_fields()
+
+    # ── Start with Windows (applied when Save Settings is clicked) ──
+
+    def _toggle_startup_choice(self):
+        if not self._startup.available:
+            return
+        self.startup_var.set(not self.startup_var.get())
+        self._refresh_startup_ui()
+
+    def _refresh_startup_ui(self):
+        status = self._startup.status()
+        on = bool(self.startup_var.get())
+        if status == "unavailable":
+            self.startup_btn.config(text="Windows only", state="disabled", bg="#313244",
+                                    fg="#585b70", cursor="arrow")
+            self.startup_hint.config(text="")
+            return
+        self.startup_btn.config(state="normal", cursor="hand2",
+                                bg="#a6e3a1" if on else "#313244",
+                                fg="#1e1e2e" if on else "#6c7086",
+                                text="Enabled" if on else "Disabled")
+        if status == "blocked" and not on:
+            hint = "Turned off in Windows (Settings > Apps > Startup). Enable it here to undo that."
+        else:
+            hint = "Starts in the tray and begins monitoring. Click Save Settings to apply."
+        self.startup_hint.config(text=hint)
+
+    def _apply_startup_choice(self):
+        """Write the Start with Windows choice. Returns an error message or None."""
+        if not self._startup.available:
+            return None
+        want = bool(self.startup_var.get())
+        if want == self._startup.is_enabled():
+            return None
+        try:
+            self._startup.set_enabled(want)
+        except Exception:
+            log.exception("Could not change Start with Windows")
+            self.startup_var.set(self._startup.is_enabled())
+            self._refresh_startup_ui()
+            return "Settings saved, but Start with Windows could not be changed. See the log file."
+        self._refresh_startup_ui()
+        return None
 
     def _path_field(self, parent, var, on_click, bg, fg):
         """File/folder name (scrolls if too long); click to choose, hover for the full path."""
@@ -2857,10 +3053,11 @@ class App:
         if errors:
             messagebox.showerror("Invalid settings", "\n\n".join(errors), parent=self.root)
             return
-        if self._save_now():
-            self.set_status("Settings saved!")
-        else:
+        startup_problem = self._apply_startup_choice()
+        if not self._save_now():
             self.set_status("Could not save settings — see the log file for details.")
+        else:
+            self.set_status(startup_problem or "Settings saved!")
 
     # ── typed inputs ──
 

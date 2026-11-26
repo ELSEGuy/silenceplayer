@@ -29,7 +29,7 @@
 - 🔁 Loop, stop, and playlist looping modes
 - 🚫 Exclude specific applications from audio detection
 - 💬 Mirroring Fix for Discord, SignalRGB, Wallpaper Engine and more
-- 🖥️ Runs quietly in the Windows system tray
+- 🖥️ Runs quietly in the Windows system tray, and can start with Windows
 - 💾 Saves your settings when you click Save Settings
 - 🎧 Supports MP3, M4A, OPUS, FLAC and MP4
 
@@ -71,7 +71,7 @@ Some apps listen to everything your PC plays and show a fake level in the Window
 
 The Mirroring Fix (on by default, in the **Advanced** tab) checks what these apps really output. If they make real sound (someone talks on Discord, a video wallpaper has audio), Silence Player reacts as usual. If they're only reacting to your sound, they're ignored.
 
-It comes with Discord, SignalRGB and Wallpaper Engine on the list, and you can add any other app. If an app starts "playing" right after your ambient sound does, Silence Player notices and offers to add it in one click.
+It comes with Discord, SignalRGB, Wallpaper Engine, Lively Wallpaper, OBS, Streamlabs, XSplit, Medal, Rainmeter, iCUE and FluentFlyout on the list, and you can add any other app. If an app starts "playing" right after your ambient sound does, Silence Player notices and offers to add it in one click.
 
 > Needs Windows 10 20H1 or later. If the check can't run on a PC, those apps simply count as playing, like before.
 

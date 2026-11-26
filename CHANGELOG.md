@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.4.0 (in progress)
+
+### Added
+- **Start with Windows.** A new switch on the Player tab. When it's on,
+  Silence Player starts when you sign in to Windows, goes straight to the tray
+  and begins monitoring. Like every other setting it is applied when you click
+  **Save Settings**. It only affects your Windows user and needs no admin
+  rights. If you turn Silence Player off in Windows' own startup settings
+  (Settings > Apps > Startup, or Task Manager), the switch shows it as off.
+- **More apps on the Mirroring Fix list:** XSplit Broadcaster and Gamecaster,
+  Lively Wallpaper and FluentFlyout. Existing settings get them added once; an
+  app you removed from the list is not added back.
+
 ## v1.3.1
 
 ### Fixed
