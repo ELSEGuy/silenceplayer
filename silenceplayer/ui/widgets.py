@@ -6,6 +6,8 @@ import tkinter.font as tkfont
 
 from PIL import Image, ImageTk
 
+from .rounded import photo, shape_image
+
 
 class MarqueeLabel(tk.Canvas):
     """A one-line label that scrolls its text when it doesn't fit.
@@ -29,14 +31,20 @@ class MarqueeLabel(tk.Canvas):
     FADE_PX        = 18
 
     def __init__(self, parent, textvariable, width_chars, bg, fg,
-                 font=("Segoe UI", 10), on_click=None, animate=True):
+                 font=("Segoe UI", 10), on_click=None, animate=True, radius=0):
         self._font = tkfont.Font(root=parent, family=font[0], size=font[1])
         width = self._font.measure("0") * width_chars + 16
         height = self._font.metrics("linespace") + 14
-        super().__init__(parent, width=width, height=height, bg=bg,
+        # radius > 0: a rounded field (continuous corners) on the parent's colour.
+        self._radius, self._outer = radius, parent.cget("bg")
+        super().__init__(parent, width=width, height=height,
+                         bg=self._outer if radius else bg,
                          highlightthickness=0, bd=0, cursor="hand2" if on_click else "")
         self._width, self._height = width, height
         self._bg, self._var = bg, textvariable
+        if radius:
+            self._field = photo(self, width, height, bg, self._outer, radius)
+            self.create_image(0, 0, anchor="nw", image=self._field)
         self._animate = animate
         self._hover = False
         self._after = None
@@ -72,13 +80,25 @@ class MarqueeLabel(tk.Canvas):
             self.itemconfig(item, fill=color)
 
     def _make_fades(self):
-        r, g, b = (v // 256 for v in self.winfo_rgb(self._bg))
-        right = Image.new("RGBA", (self.FADE_PX, self._height))
+        """Edge strips that fade the text out. On a rounded field they are cut
+        from the field's own picture, so its corners stay rounded under them."""
+        ramp = Image.new("L", (self.FADE_PX, self._height))
         for x in range(self.FADE_PX):
             alpha = int(255 * (x + 1) / self.FADE_PX)
             for y in range(self._height):
-                right.putpixel((x, y), (r, g, b, alpha))
-        left = right.transpose(Image.FLIP_LEFT_RIGHT)
+                ramp.putpixel((x, y), alpha)
+        if self._radius:
+            field = shape_image(self._width, self._height, self._bg, self._outer, self._radius)
+            right = field.crop((self._width - self.FADE_PX, 0, self._width, self._height))
+            left = field.crop((0, 0, self.FADE_PX, self._height))
+        else:
+            r, g, b = (v // 256 for v in self.winfo_rgb(self._bg))
+            right = Image.new("RGB", (self.FADE_PX, self._height), (r, g, b))
+            left = right.copy()
+        right = right.convert("RGBA")
+        right.putalpha(ramp)
+        left = left.convert("RGBA")
+        left.putalpha(ramp.transpose(Image.FLIP_LEFT_RIGHT))
         return ImageTk.PhotoImage(left, master=self), ImageTk.PhotoImage(right, master=self)
 
     def _cancel(self):

@@ -33,7 +33,19 @@ from ..paths import resource_path
 from ..player import AmbientPlayer
 from ..sources import display_name, validate_ambient_source
 from ..startup import StartupEntry
-from ..ui.tray import TrayMenu, create_tray_icon, make_tray_icon
+from ..ui.rounded import (
+    RADIUS_CARD,
+    RADIUS_CONTROL,
+    RADIUS_SMALL,
+    RoundButton,
+    RoundList,
+    RoundScrollbar,
+    RoundSlider,
+    photo,
+    round_box,
+    round_corners,
+)
+from ..ui.tray import TrayMenu, create_tray_icon, make_tray_icon, round_window_corners
 from ..ui.widgets import MarqueeLabel
 from ..updates import RELEASES_URL, UpdateChecker, current_version
 
@@ -47,7 +59,7 @@ def snap_to_step(value, step, lowest=0):
 
 
 class App:
-    WINDOW_W, WINDOW_H = 520, 750
+    WINDOW_W, WINDOW_H = 520, 760
     VOLUME_STEP = 5                # the volume slider moves 5, 10, 15 … 100
     VOLUME_LOWEST = 5              # muting makes no sense for the ambient sound
     DUCK_STEP = 10                 # the duck slider: 0 (stop), 10 … 90, 100 (keep playing)
@@ -230,7 +242,7 @@ class App:
         self.suggest_btn.config(
             text="Treat as mirroring app" if PROCTAP_IMPORT_ERROR is None else "Exclude it")
         if not self._bar_shown(self.suggest_row):
-            self.suggest_row.pack(fill="x", before=self.status_label)
+            self.suggest_row.pack(fill="x", padx=10, pady=(8, 0), before=self.status_label)
             self._fit_window()
         new = [n for n in names if n not in self._notified_suspects]
         if new and self.tray is not None and self.root.state() == "withdrawn":
@@ -284,7 +296,7 @@ class App:
         self.update_label.config(
             text=f"Silence Player v{info.version} is available. You have v{self._version}.")
         if not self._bar_shown(self.update_row):
-            self.update_row.pack(fill="x", before=self.status_label)
+            self.update_row.pack(fill="x", padx=10, pady=(8, 0), before=self.status_label)
             self._fit_window()
         if (info.tag not in self._update_notified and self.tray is not None
                 and self.root.state() == "withdrawn"):
@@ -516,12 +528,17 @@ class App:
                             font=("Segoe UI", size, "bold" if bold else "normal"))
 
         def entry(parent, textvariable, width=24):
-            return tk.Entry(parent, textvariable=textvariable, width=width,
-                            bg=BTN_BG, fg=FG, insertbackground=FG,
-                            relief="flat", font=("Segoe UI", 10), bd=6)
+            """An Entry in a rounded box; pack/grid the returned entry's .master."""
+            box = round_box(parent, BTN_BG)
+            field = tk.Entry(box, textvariable=textvariable, width=width,
+                             bg=BTN_BG, fg=FG, insertbackground=FG,
+                             relief="flat", font=("Segoe UI", 10), bd=0,
+                             highlightthickness=0)
+            field.pack(fill="x", expand=True)
+            return field
 
         def button(parent, text, command, color=ACC):
-            return tk.Button(parent, text=text, command=command,
+            return RoundButton(parent, text=text, command=command,
                              bg=BTN_BG, fg=color, relief="flat",
                              font=("Segoe UI", 10, "bold"),
                              padx=8, pady=5, cursor="hand2",
@@ -554,21 +571,21 @@ class App:
                 self.tab_advanced.pack(fill="both", expand=True)
                 self.tab_btn_advanced.config(bg=ACC, fg="#1e1e2e")
 
-        self.tab_btn_main = tk.Button(tab_bar, text="Player",
+        self.tab_btn_main = RoundButton(tab_bar, text="Player",
                                       command=lambda: switch_tab("main"),
                                       relief="flat", font=("Segoe UI", 10, "bold"),
                                       padx=16, pady=5, cursor="hand2",
                                       bg=ACC, fg="#1e1e2e")
         self.tab_btn_main.pack(side="left", padx=3)
 
-        self.tab_btn_exclude = tk.Button(tab_bar, text="Exclude Apps",
+        self.tab_btn_exclude = RoundButton(tab_bar, text="Exclude Apps",
                                          command=lambda: switch_tab("exclude"),
                                          relief="flat", font=("Segoe UI", 10, "bold"),
                                          padx=16, pady=5, cursor="hand2",
                                          bg=BTN_BG, fg=DIM)
         self.tab_btn_exclude.pack(side="left", padx=3)
 
-        self.tab_btn_advanced = tk.Button(tab_bar, text="Advanced",
+        self.tab_btn_advanced = RoundButton(tab_bar, text="Advanced",
                                           command=lambda: switch_tab("advanced"),
                                           relief="flat", font=("Segoe UI", 10, "bold"),
                                           padx=16, pady=5, cursor="hand2",
@@ -585,38 +602,40 @@ class App:
         status_frame.pack(fill="x", side="bottom")
 
         # "A new version is available" (hidden until needed).
-        self.update_row = tk.Frame(status_frame, bg="#313244", padx=10, pady=6)
+        self.update_row = tk.Frame(status_frame, bg="#313244", padx=12, pady=8)
+        round_corners(self.update_row, RADIUS_CARD)
         self.update_label = tk.Label(self.update_row, bg="#313244", fg=FG,
-                                     font=("Segoe UI", 9), wraplength=490, justify="left")
+                                     font=("Segoe UI", 9), wraplength=470, justify="left")
         self.update_label.pack(anchor="w")
         update_buttons = tk.Frame(self.update_row, bg="#313244")
         update_buttons.pack(anchor="w", pady=(4, 0))
-        self.update_btn = tk.Button(update_buttons, text="Download", command=self._open_update,
+        self.update_btn = RoundButton(update_buttons, text="Download", command=self._open_update,
                                     bg="#a6e3a1", fg="#1e1e2e", relief="flat",
                                     font=("Segoe UI", 9, "bold"), padx=10, pady=3,
                                     cursor="hand2")
         self.update_btn.pack(side="left")
         for text, cmd in (("Skip this version", self._skip_update),
                           ("Later", self._update_later_clicked)):
-            tk.Button(update_buttons, text=text, command=cmd,
-                      bg=BTN_BG, fg=DIM, relief="flat", font=("Segoe UI", 9, "bold"),
+            RoundButton(update_buttons, text=text, command=cmd,
+                      bg="#45475a", fg=FG, relief="flat", font=("Segoe UI", 9, "bold"),
                       padx=10, pady=3, cursor="hand2").pack(side="left", padx=(6, 0))
 
         # One-click fix for an app that seems to mirror our sound (hidden until needed).
-        self.suggest_row = tk.Frame(status_frame, bg="#313244", padx=10, pady=6)
+        self.suggest_row = tk.Frame(status_frame, bg="#313244", padx=12, pady=8)
+        round_corners(self.suggest_row, RADIUS_CARD)
         self.suggest_label = tk.Label(self.suggest_row, bg="#313244", fg=FG,
-                                      font=("Segoe UI", 9), wraplength=490, justify="left")
+                                      font=("Segoe UI", 9), wraplength=470, justify="left")
         self.suggest_label.pack(anchor="w")
         suggest_buttons = tk.Frame(self.suggest_row, bg="#313244")
         suggest_buttons.pack(anchor="w", pady=(4, 0))
-        self.suggest_btn = tk.Button(suggest_buttons, text="Treat as mirroring app",
+        self.suggest_btn = RoundButton(suggest_buttons, text="Treat as mirroring app",
                                      command=self._accept_mirror_suggestion,
                                      bg=ACC, fg="#1e1e2e", relief="flat",
                                      font=("Segoe UI", 9, "bold"), padx=10, pady=3,
                                      cursor="hand2")
         self.suggest_btn.pack(side="left")
-        tk.Button(suggest_buttons, text="Dismiss", command=self._dismiss_mirror_suggestion,
-                  bg=BTN_BG, fg=DIM, relief="flat", font=("Segoe UI", 9, "bold"),
+        RoundButton(suggest_buttons, text="Dismiss", command=self._dismiss_mirror_suggestion,
+                  bg="#45475a", fg=FG, relief="flat", font=("Segoe UI", 9, "bold"),
                   padx=10, pady=3, cursor="hand2").pack(side="left", padx=(6, 0))
 
         # Version number, tucked away bottom-left (handy for bug reports). The
@@ -653,7 +672,7 @@ class App:
                 self.mode_var.set(val)
                 self.config["mode"] = val
                 _refresh_mode()
-            b = tk.Button(mode_frame, text=text, command=on_click,
+            b = RoundButton(mode_frame, text=text, command=on_click,
                           relief="flat", font=("Segoe UI", 10, "bold"),
                           padx=12, pady=5, cursor="hand2", disabledforeground="#585b70")
             b.pack(side="left", padx=3)
@@ -685,6 +704,7 @@ class App:
                 single_card.pack_forget()
 
         single_card = tk.Frame(parent, bg=CARD, padx=16, pady=12)
+        round_corners(single_card)
         label(single_card, "Ambient Sound File", bold=True).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
         self.mp3_var = tk.StringVar()
@@ -701,7 +721,7 @@ class App:
                 self.single_loop_var.set(val)
                 self.config["single_loop_mode"] = val
                 _refresh_single_toggle()
-            b = tk.Button(single_toggle_frame, text=text, command=on_click,
+            b = RoundButton(single_toggle_frame, text=text, command=on_click,
                           relief="flat", font=("Segoe UI", 9, "bold"),
                           padx=8, pady=4, cursor="hand2")
             b.pack(side="left", padx=2)
@@ -720,11 +740,14 @@ class App:
         _refresh_single_toggle()
 
         playlist_card = tk.Frame(parent, bg=CARD, padx=16, pady=12)
+        round_corners(playlist_card)
         label(playlist_card, "Ambient Sound Playlist (Folder)", bold=True).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
         self.playlist_var = tk.StringVar()
+        # Narrower than the file field: this row also holds three loop buttons.
         self.playlist_entry = self._path_field(playlist_card, self.playlist_var,
-                                               self._browse_playlist, BTN_BG, FG)
+                                               self._browse_playlist, BTN_BG, FG,
+                                               width_chars=15)
         self.playlist_entry.grid(row=1, column=0, sticky="w")
         self.playlist_browse_btn = button(playlist_card, "Browse", self._browse_playlist)
         self.playlist_browse_btn.config(disabledforeground="#585b70")
@@ -742,7 +765,7 @@ class App:
                 self.playlist_loop_var.set(val)
                 self.config["playlist_loop_mode"] = val
                 _refresh_playlist_toggle()
-            b = tk.Button(playlist_toggle_frame, text=text, command=on_click,
+            b = RoundButton(playlist_toggle_frame, text=text, command=on_click,
                           relief="flat", font=("Segoe UI", 9, "bold"),
                           padx=8, pady=4, cursor="hand2")
             b.pack(side="left", padx=2)
@@ -764,6 +787,7 @@ class App:
         _refresh_playlist_toggle()
 
         shared_card = tk.Frame(parent, bg=CARD, padx=16, pady=12)
+        round_corners(shared_card)
         shared_card.pack(fill="x", padx=24, pady=4)
 
         # One row: Silence Timeout on the left, Fade on the right. (The volume is
@@ -773,7 +797,7 @@ class App:
         silence_row.pack(side="left")
         label(silence_row, "Silence Timeout", bold=True, color=FG).pack(side="left", padx=(0, 10))
         self.silence_entry = entry(silence_row, self.silence_var, width=5)
-        self.silence_entry.pack(side="left")
+        self.silence_entry.master.pack(side="left")
         label(silence_row, "sec", size=9, color=DIM).pack(side="left", padx=(6, 0))
 
         # Typed values are committed when the field loses focus or Enter is pressed
@@ -795,7 +819,7 @@ class App:
                 fg="#1e1e2e" if v else DIM,
                 text="Enabled" if v else "Disabled")
 
-        self.fade_btn = tk.Button(fade_row,
+        self.fade_btn = RoundButton(fade_row,
                                   command=lambda: [
                                       self.fade_enabled_var.set(not self.fade_enabled_var.get()),
                                       toggle_fade()],
@@ -805,6 +829,7 @@ class App:
         toggle_fade()
 
         duck_card = tk.Frame(parent, bg=CARD, padx=16, pady=12)
+        round_corners(duck_card)
         duck_card.pack(fill="x", padx=24, pady=4)
 
         duck_top = tk.Frame(duck_card, bg=CARD)
@@ -833,12 +858,10 @@ class App:
             else:
                 self.duck_label.config(text=f"Duck to {v}%")
 
-        tk.Scale(duck_card, from_=0, to=100, orient="horizontal",
-                 variable=self.duck_var, command=on_duck_change,
-                 resolution=self.DUCK_STEP,
-                 bg=CARD, fg=FG, troughcolor=BTN_BG,
-                 highlightthickness=0, sliderrelief="flat",
-                 length=460, showvalue=False).pack(fill="x")
+        self.duck_slider = RoundSlider(duck_card, from_=0, to=100, resolution=self.DUCK_STEP,
+                                       variable=self.duck_var, command=on_duck_change,
+                                       track=BTN_BG, fill=ACC, knob=FG, length=420)
+        self.duck_slider.pack(fill="x")
         on_duck_change(self.duck_var.get())
         self._on_duck_change = on_duck_change
 
@@ -863,12 +886,14 @@ class App:
 
     def _build_now_playing(self, parent, CARD, FG, DIM, BTN_BG, ACC):
         card = tk.Frame(parent, bg=CARD, padx=8, pady=10)
+        round_corners(card)
         card.pack(fill="x", padx=24, pady=(10, 0))
         head = tk.Frame(card, bg=CARD)
         head.pack(fill="x", padx=8)
         tk.Label(head, text="Now playing", bg=CARD, fg=FG,
                  font=("Segoe UI", 10, "bold")).pack(side="left")
-        self.np_badge = tk.Label(head, text="Off", font=("Segoe UI", 8, "bold"), padx=7, pady=1)
+        self.np_badge = RoundButton(head, text="Off", font=("Segoe UI", 8, "bold"), padx=8,
+                                    pady=1, border=0, radius=RADIUS_SMALL)
         self.np_badge.pack(side="right")
         self.np_title_var = tk.StringVar(value="")
         self.np_title = MarqueeLabel(card, self.np_title_var, width_chars=48, bg=CARD, fg=FG,
@@ -882,10 +907,10 @@ class App:
         self.np_bar = tk.Canvas(card, height=14, bg=CARD, highlightthickness=0, bd=0,
                                 cursor="hand2")
         self.np_bar.pack(fill="x", padx=8, pady=(6, 0))
-        self._np_track = self.np_bar.create_rectangle(0, 5, 0, 9, width=0, fill="#313244")
-        self._np_fill = self.np_bar.create_rectangle(0, 5, 0, 9, width=0, fill="#a6e3a1")
-        self._np_knob = self.np_bar.create_oval(0, 2, 10, 12, width=0, fill="#cdd6f4",
-                                                state="hidden")
+        self._np_track = self.np_bar.create_image(0, 5, anchor="nw")
+        self._np_fill = self.np_bar.create_image(0, 5, anchor="nw")
+        self._np_knob = self.np_bar.create_image(0, 2, anchor="nw", state="hidden")
+        self._np_images = []
         self._np_drag = None          # 0..1 while the bar is being dragged
         self._np_hover = False
         self.np_bar.bind("<Enter>", lambda e: self._np_set_hover(True))
@@ -906,12 +931,10 @@ class App:
         self.config["max_volume"] = snap_to_step(self.config.get("max_volume", 50),
                                                  self.VOLUME_STEP, self.VOLUME_LOWEST)
         self.np_vol_var = tk.IntVar(value=self.config["max_volume"])
-        self.np_vol = tk.Scale(vol_row, from_=self.VOLUME_LOWEST, to=100, orient="horizontal",
-                               variable=self.np_vol_var, command=self._np_volume_changed,
-                               resolution=self.VOLUME_STEP,
-                               bg=CARD, fg=FG, troughcolor=BTN_BG, activebackground=ACC,
-                               highlightthickness=0, sliderrelief="flat", showvalue=False,
-                               sliderlength=14, width=8, bd=0, cursor="hand2")
+        self.np_vol = RoundSlider(vol_row, from_=self.VOLUME_LOWEST, to=100,
+                                  resolution=self.VOLUME_STEP, variable=self.np_vol_var,
+                                  command=self._np_volume_changed,
+                                  track=BTN_BG, fill=ACC, knob=FG)
         self.np_vol.pack(side="left", fill="x", expand=True, padx=(10, 6))
         self.np_vol_label.config(text=f"{self.np_vol_var.get()}%")
 
@@ -921,16 +944,20 @@ class App:
         if self._np_drag is not None:
             frac = self._np_drag
         color = self.NOW_COLORS.get(now.kind if now else "off")[0]
-        width = max(1, self.np_bar.winfo_width())
+        width = max(4, self.np_bar.winfo_width())
         x = round(width * frac)
-        self.np_bar.coords(self._np_track, 0, 5, width, 9)
-        self.np_bar.coords(self._np_fill, 0, 5, x, 9)
-        self.np_bar.itemconfig(self._np_fill, fill=color)
+        track = photo(self.np_bar, width, 4, "#313244", kind="capsule")
+        fill = photo(self.np_bar, max(4, x), 4, color, kind="capsule")
+        knob = photo(self.np_bar, 10, 10, "#cdd6f4", kind="capsule")
+        self._np_images = [track, fill, knob]       # keep them alive while shown
+        self.np_bar.itemconfig(self._np_track, image=track)
+        self.np_bar.itemconfig(self._np_fill, image=fill, state="normal" if x > 0 else "hidden")
         show_knob = (now is not None and now.progress is not None
                      and (self._np_hover or self._np_drag is not None))
         knob_x = min(max(x, 5), width - 5)
-        self.np_bar.coords(self._np_knob, knob_x - 5, 2, knob_x + 5, 12)
-        self.np_bar.itemconfig(self._np_knob, state="normal" if show_knob else "hidden")
+        self.np_bar.coords(self._np_knob, knob_x - 5, 2)
+        self.np_bar.itemconfig(self._np_knob, image=knob,
+                               state="normal" if show_knob else "hidden")
 
     # ── playback controls ──
 
@@ -1052,7 +1079,7 @@ class App:
                                 fg="#1e1e2e" if on else "#6c7086",
                                 text="Enabled" if on else "Disabled")
         if status == "blocked" and not on:
-            hint = "Turned off in Windows (Settings > Apps > Startup). Enable it here to undo that."
+            hint = "Turned off in Windows Settings (Startup apps). Enable it here to undo."
         else:
             hint = "Starts in the tray and begins monitoring. Click Save Settings to apply."
         self.startup_hint.config(text=hint)
@@ -1074,9 +1101,10 @@ class App:
         self._refresh_startup_ui()
         return None
 
-    def _path_field(self, parent, var, on_click, bg, fg):
+    def _path_field(self, parent, var, on_click, bg, fg, width_chars=22):
         """File/folder name (scrolls if too long); click to choose, hover for the full path."""
-        field = MarqueeLabel(parent, var, width_chars=22, bg=bg, fg=fg, on_click=on_click)
+        field = MarqueeLabel(parent, var, width_chars=width_chars, bg=bg, fg=fg,
+                             on_click=on_click, radius=RADIUS_CONTROL)
         field.bind("<Enter>", lambda e: self._show_path_tip(field), add="+")
         field.bind("<Leave>", lambda e: self._hide_path_tip(), add="+")
         return field
@@ -1097,7 +1125,10 @@ class App:
         tip.wm_overrideredirect(True)
         tip.wm_geometry(f"+{field.winfo_rootx()}+{field.winfo_rooty() + field.winfo_height() + 4}")
         tk.Label(tip, text=os.path.normpath(full), bg="#313244", fg="#cdd6f4",
-                 font=("Segoe UI", 9), padx=8, pady=4, relief="solid", bd=1).pack()
+                 font=("Segoe UI", 9), padx=10, pady=5, bd=0).pack()
+        # Rounded corners and a border drawn by Windows 11, like the tray menu.
+        tip.update_idletasks()
+        round_window_corners(tip, "#45475a")
         self._path_tip = tip
 
     def _hide_path_tip(self):
@@ -1111,6 +1142,7 @@ class App:
 
     def _build_exclude_tab(self, parent, BG, CARD, FG, ACC, BTN_BG, DIM):
         card = tk.Frame(parent, bg=CARD, padx=16, pady=12)
+        round_corners(card)
         card.pack(fill="both", padx=24, pady=12, expand=True)
 
         tk.Label(card, text="Exclude Apps", bg=CARD, fg=FG,
@@ -1118,18 +1150,16 @@ class App:
         tk.Label(card, text="Sound from these apps will be ignored by Silence Player.",
                  bg=CARD, fg=DIM, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 8))
 
-        list_frame = tk.Frame(card, bg=CARD)
+        list_frame = round_box(card, BTN_BG, padx=4, pady=4)
         list_frame.pack(fill="both", expand=True)
 
-        scrollbar = tk.Scrollbar(list_frame)
-        scrollbar.pack(side="right", fill="y")
+        scrollbar = RoundScrollbar(list_frame)
+        scrollbar.pack(side="right", fill="y", pady=4)
 
-        self.exclude_listbox = tk.Listbox(
-            list_frame, yscrollcommand=scrollbar.set,
-            bg=BTN_BG, fg=FG,
+        self.exclude_listbox = RoundList(
+            list_frame, yscrollcommand=scrollbar.set, fg=FG,
             selectbackground=ACC, selectforeground="#1e1e2e",
-            relief="flat", font=("Segoe UI", 10),
-            height=8, borderwidth=0)
+            font=("Segoe UI", 10), height=8)
         self.exclude_listbox.pack(fill="both", expand=True)
         scrollbar.config(command=self.exclude_listbox.yview)
 
@@ -1140,10 +1170,12 @@ class App:
         add_frame.pack(fill="x", pady=(8, 0))
 
         self.exclude_entry_var = tk.StringVar()
-        add_entry = tk.Entry(add_frame, textvariable=self.exclude_entry_var,
-                             bg=BTN_BG, fg=FG, insertbackground=FG,
-                             relief="flat", font=("Segoe UI", 10), bd=6, width=22)
-        add_entry.pack(side="left", fill="x", expand=True)
+        add_box = round_box(add_frame, BTN_BG)
+        add_box.pack(side="left", fill="x", expand=True)
+        add_entry = tk.Entry(add_box, textvariable=self.exclude_entry_var,
+                             bg=BTN_BG, fg=FG, insertbackground=FG, highlightthickness=0,
+                             relief="flat", font=("Segoe UI", 10), bd=0, width=22)
+        add_entry.pack(fill="x", expand=True)
 
         tk.Label(add_frame, text="e.g. discord.exe", bg=CARD, fg=DIM,
                  font=("Segoe UI", 8)).pack(side="left", padx=(6, 0))
@@ -1167,11 +1199,11 @@ class App:
         btn_row = tk.Frame(card, bg=CARD)
         btn_row.pack(fill="x", pady=(6, 0))
 
-        tk.Button(btn_row, text="Add", command=add_app,
+        RoundButton(btn_row, text="Add", command=add_app,
                   bg=ACC, fg="#1e1e2e", relief="flat",
                   font=("Segoe UI", 10, "bold"),
                   padx=16, pady=5, cursor="hand2").pack(side="left", padx=(0, 6))
-        tk.Button(btn_row, text="Remove Selected", command=remove_app,
+        RoundButton(btn_row, text="Remove Selected", command=remove_app,
                   bg=BTN_BG, fg="#f38ba8", relief="flat",
                   font=("Segoe UI", 10, "bold"),
                   padx=16, pady=5, cursor="hand2").pack(side="left")
@@ -1186,6 +1218,7 @@ class App:
                  bg=BG, fg=DIM, font=("Segoe UI", 9)).pack(pady=(0, 8))
 
         card = tk.Frame(parent, bg=CARD, padx=16, pady=12)
+        round_corners(card)
         card.pack(fill="x", padx=24, pady=4)
 
         title_row = tk.Frame(card, bg=CARD)
@@ -1202,7 +1235,7 @@ class App:
             self._apply_mirror_state()
             self._refresh_mirror_ui()
 
-        self.mirror_btn = tk.Button(title_row, command=toggle_mirror_fix,
+        self.mirror_btn = RoundButton(title_row, command=toggle_mirror_fix,
                                     relief="flat", font=("Segoe UI", 9, "bold"),
                                     padx=12, pady=4, cursor="hand2")
         self.mirror_btn.pack(side="right")
@@ -1216,15 +1249,14 @@ class App:
                  bg=CARD, fg=DIM, font=("Segoe UI", 9),
                  justify="left").pack(anchor="w", pady=(6, 6))
 
-        list_frame = tk.Frame(card, bg=CARD)
+        list_frame = round_box(card, BTN_BG, padx=4, pady=4)
         list_frame.pack(fill="x")
-        scrollbar = tk.Scrollbar(list_frame)
-        scrollbar.pack(side="right", fill="y")
-        self.mirror_listbox = tk.Listbox(
-            list_frame, yscrollcommand=scrollbar.set,
-            bg=BTN_BG, fg=FG, selectbackground=ACC, selectforeground="#1e1e2e",
-            relief="flat", font=("Segoe UI", 10), height=5, borderwidth=0,
-            activestyle="none")
+        scrollbar = RoundScrollbar(list_frame)
+        scrollbar.pack(side="right", fill="y", pady=4)
+        self.mirror_listbox = RoundList(
+            list_frame, yscrollcommand=scrollbar.set, fg=FG,
+            selectbackground=ACC, selectforeground="#1e1e2e",
+            font=("Segoe UI", 10), height=5)
         self.mirror_listbox.pack(fill="x", expand=True)
         scrollbar.config(command=self.mirror_listbox.yview)
 
@@ -1268,15 +1300,17 @@ class App:
         add_row = tk.Frame(card, bg=CARD)
         add_row.pack(fill="x", pady=(6, 0))
         self.mirror_entry_var = tk.StringVar()
-        add_entry = tk.Entry(add_row, textvariable=self.mirror_entry_var,
-                             bg=BTN_BG, fg=FG, insertbackground=FG,
-                             relief="flat", font=("Segoe UI", 10), bd=6, width=18)
-        add_entry.pack(side="left")
+        add_box = round_box(add_row, BTN_BG)
+        add_box.pack(side="left")
+        add_entry = tk.Entry(add_box, textvariable=self.mirror_entry_var,
+                             bg=BTN_BG, fg=FG, insertbackground=FG, highlightthickness=0,
+                             relief="flat", font=("Segoe UI", 10), bd=0, width=18)
+        add_entry.pack()
         add_entry.bind("<Return>", add_app)
         for text, cmd, color in (("Add", add_app, ACC),
                                  ("On / Off", toggle_selected, FG),
                                  ("Remove", remove_selected, "#f38ba8")):
-            tk.Button(add_row, text=text, command=cmd, bg=BTN_BG, fg=color,
+            RoundButton(add_row, text=text, command=cmd, bg=BTN_BG, fg=color,
                       relief="flat", font=("Segoe UI", 9, "bold"), padx=10, pady=4,
                       cursor="hand2").pack(side="left", padx=(6, 0))
 
@@ -1287,6 +1321,7 @@ class App:
 
         # Update check
         update_card = tk.Frame(parent, bg=CARD, padx=16, pady=10)
+        round_corners(update_card)
         update_card.pack(fill="x", padx=24, pady=4)
         top = tk.Frame(update_card, bg=CARD)
         top.pack(fill="x")
@@ -1300,11 +1335,11 @@ class App:
                 self.updater.check_now()
             self._refresh_update_status()
 
-        self.update_toggle = tk.Button(top, command=toggle_updates, relief="flat",
+        self.update_toggle = RoundButton(top, command=toggle_updates, relief="flat",
                                        font=("Segoe UI", 9, "bold"), padx=12, pady=4,
                                        cursor="hand2")
         self.update_toggle.pack(side="right")
-        tk.Button(top, text="Check now", command=self._check_updates_now, bg=BTN_BG, fg=ACC,
+        RoundButton(top, text="Check now", command=self._check_updates_now, bg=BTN_BG, fg=ACC,
                   relief="flat", font=("Segoe UI", 9, "bold"), padx=10, pady=4,
                   cursor="hand2").pack(side="right", padx=(0, 6))
         self.update_status = tk.Label(update_card, bg=CARD, fg=DIM, font=("Segoe UI", 9),
@@ -1314,13 +1349,14 @@ class App:
 
         # Start with Windows (applied with Save Settings, like the other settings)
         startup_card = tk.Frame(parent, bg=CARD, padx=16, pady=10)
+        round_corners(startup_card)
         startup_card.pack(fill="x", padx=24, pady=4)
         startup_top = tk.Frame(startup_card, bg=CARD)
         startup_top.pack(fill="x")
         tk.Label(startup_top, text="Start with Windows", bg=CARD, fg=FG,
                  font=("Segoe UI", 10, "bold")).pack(side="left")
         self.startup_var = tk.BooleanVar(value=self._startup.is_enabled())
-        self.startup_btn = tk.Button(startup_top, command=self._toggle_startup_choice,
+        self.startup_btn = RoundButton(startup_top, command=self._toggle_startup_choice,
                                      relief="flat", font=("Segoe UI", 9, "bold"),
                                      padx=12, pady=4, cursor="hand2")
         self.startup_btn.pack(side="right")

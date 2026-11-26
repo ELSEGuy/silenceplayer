@@ -20,6 +20,14 @@
 - **Playlist and mode locked while monitoring.** The playlist folder and the
   Single File / Playlist mode can't be changed while monitoring is on (Browse
   and the other mode are greyed out); stop monitoring to change them.
+- **Continuous corners everywhere.** Cards, buttons, tabs, toggles, text
+  fields, lists (including the selected row), sliders, the progress bar, the
+  status badge and the bottom banners now have Apple-style continuous
+  ("squircle") corners: the curve eases out of the straight edge instead of
+  switching abruptly to a circle. Drawn smooth (anti-aliased) at each
+  element's exact size, with one radius scale across the app. Sliders have
+  pill-shaped tracks with round knobs, lists a slim pill scrollbar, and the
+  file-path tooltip has rounded corners on Windows 11.
 - **Tidier Player tab.** Silence Timeout and Fade share one row, Start with
   Windows moved to the Advanced tab, the file card is just "Ambient Sound
   File", and the duck description reads 10-90% to match the slider's steps.

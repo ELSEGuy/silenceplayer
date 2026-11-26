@@ -378,7 +378,7 @@ def test_settings_layout(appmod, root, cfg_path, fast_timing):
     a._show_window()
     pump(root, 0.1)
     # Silence Timeout and Fade share one row
-    assert a.silence_entry.master.master is a.fade_btn.master.master
+    assert a.silence_entry.master.master.master is a.fade_btn.master.master   # same card
     assert abs(a.silence_entry.winfo_rooty() - a.fade_btn.winfo_rooty()) < 12
     # Start with Windows lives in the Advanced tab only
     w = a.startup_btn
