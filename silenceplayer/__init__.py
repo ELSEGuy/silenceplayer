@@ -4,4 +4,4 @@ Each module has one job; see README.md ("How the code is organised").
 """
 
 APP_NAME    = "SilencePlayer"
-APP_VERSION = "1.4.0-dev"
+APP_VERSION = "1.4.0"

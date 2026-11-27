@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.4.0 (in progress)
+## v1.4.0
 
 ### Added
 - **Now playing.** A card at the top of the Player tab shows the file that is
