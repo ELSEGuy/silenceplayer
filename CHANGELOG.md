@@ -65,7 +65,7 @@
   mute) and the duck slider in steps of 10% (0% stop, 10–90% duck, 100% keep playing); a saved value
   between steps is rounded to the nearest one.
 - **New tray menu.** Right-clicking the tray icon opens a dark menu in Silence
-  Player's own style, headed by what's playing (green), ducked (yellow) or
+  Player's own style, headed by what's playing (purple), ducked (yellow) or
   waiting for silence, and updating live while it's open. Rounded corners on
   Windows 11.
 - **Update notice.** Silence Player checks GitHub for a newer stable release
@@ -74,7 +74,7 @@
   the tray menu gets a "Download" entry. Pre-releases are never offered. You
   can switch the check off, or check right away, under **Advanced > Check for
   updates**. Nothing is downloaded or installed by itself.
-- **Start with Windows.** A new switch on the Player tab. When it's on,
+- **Start with Windows.** A new switch on the Advanced tab. When it's on,
   Silence Player starts when you sign in to Windows, goes straight to the tray
   and begins monitoring. Like every other setting it is applied when you click
   **Save Settings**. It only affects your Windows user and needs no admin
