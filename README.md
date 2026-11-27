@@ -134,8 +134,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1 -Installer   # ...and the ins
 `build.ps1` creates a clean `.venv-build`, installs the pinned versions from
 `requirements.txt` and `requirements-dev.txt`, runs the tests and builds:
 
-- `dist\SilencePlayer\` the app folder (`silenceplayer.exe`, with Python and VLC in `_internal`,
-  and the license files)
+- `dist\SilencePlayer\` the app folder (`silenceplayer.exe`, with Python and VLC in `_internal`)
 - `dist\SilencePlayer-<version>-portable.zip` that folder, zipped
 - `dist\SilencePlayer-Setup-<version>.exe` the installer (with `-Installer`)
 - `dist\SHA256SUMS.txt` and `dist\build-freeze.txt` (checksums, exact package versions)
@@ -200,10 +199,6 @@ Silence Player is licensed under the **Creative Commons Attribution-NonCommercia
 You may share and modify the project for non-commercial purposes with appropriate attribution.
 
 Commercial use requires permission from the author.
-
-Silence Player ships with VLC and other open-source software, which keep their own
-licenses. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md); the app folder has the
-same list as `THIRD-PARTY-NOTICES.txt`, with the full license texts in `licenses`.
 
 ## Credits
 

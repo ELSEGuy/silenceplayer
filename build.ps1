@@ -1,5 +1,5 @@
 # Builds Silence Player from a clean virtual environment:
-#   dist\SilencePlayer\                      the app folder (silenceplayer.exe + _internal + license files)
+#   dist\SilencePlayer\                      the app folder (silenceplayer.exe + _internal)
 #   dist\SilencePlayer-<version>-portable.zip that folder zipped, to run from anywhere
 #   dist\SilencePlayer-Setup-<version>.exe    the installer (with -Installer)
 #   dist\SHA256SUMS.txt                       checksums of the files above
@@ -68,9 +68,6 @@ Invoke-Checked "PyInstaller" { & $py -m PyInstaller --clean --noconfirm silencep
 
 $appDir = "dist\SilencePlayer"
 if (-not (Test-Path "$appDir\silenceplayer.exe")) { throw "PyInstaller did not produce $appDir\silenceplayer.exe" }
-
-# LICENSE.txt, THIRD-PARTY-NOTICES.txt and licenses\ next to silenceplayer.exe
-Invoke-Checked "License files" { & $py tools\collect_licenses.py $appDir }
 
 $zip = "dist\SilencePlayer-$version-portable.zip"
 if (Test-Path $zip) { Remove-Item $zip }

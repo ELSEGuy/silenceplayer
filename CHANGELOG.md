@@ -2,20 +2,10 @@
 
 ## v1.4.1 (in progress)
 
-### Added
-- **License files in the app folder.** Next to `silenceplayer.exe` there are
-  now `LICENSE.txt` (Silence Player's license), `THIRD-PARTY-NOTICES.txt` (the
-  open-source software it includes, such as VLC, and their licenses) and a
-  `licenses` folder with the full license texts.
-
 ### For contributors
-- `THIRD-PARTY-NOTICES.md` lists what the app ships with. `build.ps1` copies
-  it and the license texts into the app folder (`tools/collect_licenses.py`
-  takes each package's license files from the build environment, so they
-  match the versions built in).
 - `tools/update_vlc.py` also writes the new VLC version into README.md,
-  requirements.txt, silenceplayer.spec and the notices, and a test checks
-  that they agree (requirements.txt still said 3.0.23).
+  requirements.txt and silenceplayer.spec, and a test checks that they agree
+  (requirements.txt still said 3.0.23).
 - The tests run on a PC without tkinter again, as the README says (the
   window tests are skipped there).
 

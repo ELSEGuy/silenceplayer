@@ -25,8 +25,8 @@ from vlc_files import VLC_VERSION, vlc_files  # noqa: E402
 
 BASE = "https://download.videolan.org/pub/videolan/vlc/{v}/win64/"
 
-# Files that name the bundled VLC version (tests/test_licenses.py checks them).
-DOCS = ["README.md", "requirements.txt", "silenceplayer.spec", "THIRD-PARTY-NOTICES.md"]
+# Files that name the bundled VLC version (tests/test_vlc_version.py checks them).
+DOCS = ["README.md", "requirements.txt", "silenceplayer.spec"]
 
 
 def fetch(url, dest=None):
