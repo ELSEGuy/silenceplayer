@@ -10,7 +10,7 @@ comtypes==1.4.15
 psutil==7.2.2
 
 # Playback. python-vlc is only the binding; the VLC engine itself is the
-# bundled libvlc.dll / libvlccore.dll / plugins/ (VLC 3.0.23 x64) in this repo.
+# bundled libvlc.dll / libvlccore.dll / plugins/ (VLC 3.0.24 x64) in this repo.
 python-vlc==3.0.21203
 
 # System tray (pystray needs Pillow + six)

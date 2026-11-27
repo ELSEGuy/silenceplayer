@@ -6,10 +6,12 @@
 Downloads the official 64-bit zip from download.videolan.org, checks its
 SHA-256 against the checksum VideoLAN publishes next to it, then replaces
 libvlc.dll, libvlccore.dll and the plugins Silence Player uses (the list in
-tools/vlc_files.py). Run the tests and try a few files afterwards.
+tools/vlc_files.py), and writes the new version everywhere it is named
+(DOCS below). Run the tests and try a few files afterwards.
 """
 import argparse
 import hashlib
+import importlib.util
 import re
 import shutil
 import sys
@@ -19,9 +21,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
-from vlc_files import vlc_files  # noqa: E402
+from vlc_files import VLC_VERSION, vlc_files  # noqa: E402
 
 BASE = "https://download.videolan.org/pub/videolan/vlc/{v}/win64/"
+
+# Files that name the bundled VLC version (tests/test_licenses.py checks them).
+DOCS = ["README.md", "requirements.txt", "silenceplayer.spec", "THIRD-PARTY-NOTICES.md"]
 
 
 def fetch(url, dest=None):
@@ -67,11 +72,23 @@ def main():
             with z.open(index[rel]) as src, open(dest, "wb") as out:
                 shutil.copyfileobj(src, out)
 
-    files = ROOT / "tools" / "vlc_files.py"
-    text = re.sub(r'VLC_VERSION = "[^"]*"', f'VLC_VERSION = "{args.version}"',
+    write_version(VLC_VERSION, args.version)
+    print(f"Bundled VLC is now {args.version} ({len(vlc_files())} files).")
+
+
+def write_version(old, new, root=ROOT):
+    """Writes the new VLC version into tools/vlc_files.py and the DOCS."""
+    files = root / "tools" / "vlc_files.py"
+    text = re.sub(r'VLC_VERSION = "[^"]*"', f'VLC_VERSION = "{new}"',
                   files.read_text(encoding="utf-8"))
     files.write_text(text, encoding="utf-8")
-    print(f"Bundled VLC is now {args.version} ({len(vlc_files())} files).")
+    # Python cached the old vlc_files.py when this script imported it. Rewritten
+    # within the same second at the same size, the next import would still
+    # read that cache (and the old version), so drop it.
+    Path(importlib.util.cache_from_source(str(files))).unlink(missing_ok=True)
+    for doc in DOCS:    # as bytes, so line endings stay as they are
+        path = root / doc
+        path.write_bytes(path.read_bytes().replace(old.encode(), new.encode()))
 
 
 if __name__ == "__main__":

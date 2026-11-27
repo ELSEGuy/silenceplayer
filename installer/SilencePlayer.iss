@@ -56,8 +56,10 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [InstallDelete]
 ; Upgrades: start from a clean bundle so files a newer version no longer
-; ships (old VLC plugins, ...) don't linger. config.json is not in here.
+; ships (old VLC plugins, license files of old package versions, ...) don't
+; linger. config.json is not in here.
 Type: filesandordirs; Name: "{app}\_internal"
+Type: filesandordirs; Name: "{app}\licenses"
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
