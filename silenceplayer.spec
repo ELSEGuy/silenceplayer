@@ -1,50 +1,36 @@
 # -*- mode: python ; coding: utf-8 -*-
 #
-# PyInstaller build for Silence Player (one-file, no console).
+# PyInstaller build for Silence Player (one folder, no console).
 #
 #   pyinstaller --clean --noconfirm silenceplayer.spec
 #
-# Or run build.ps1, which also creates a clean venv and runs the tests.
-# Output: dist\silenceplayer.exe  (the name app.py treats as "itself", and
-# the name every release so far has used).
+# Or run build.ps1, which also creates a clean venv, runs the tests, zips the
+# portable version and builds the installer.
+#
+# Output: dist\SilencePlayer\silenceplayer.exe, with the Python runtime, VLC
+# and the icons in dist\SilencePlayer\_internal. A folder starts faster than
+# a single self-extracting EXE and is less likely to be flagged by antivirus;
+# the installer (installer\SilencePlayer.iss) copies this folder.
 from pathlib import Path
 
 ROOT = Path(SPECPATH)
 
-# The VLC engine that gets bundled: VLC 3.0.23 (x64), committed to this repo.
+# The VLC engine that gets bundled: VLC 3.0.24 (x64), from the official
+# win64 zip (see tools\update_vlc.py), committed to this repo.
 # Listed explicitly so the build never picks up a system VLC install.
-# app.py points python-vlc at these via PYTHON_VLC_LIB_PATH/MODULE_PATH.
+# silenceplayer\player.py points python-vlc at these files.
 #
-# Only the plugins needed to play local audio are bundled (24 MB instead of
-# the full 133 MB plugins/ folder: no video, network, discs, GUI, Lua...).
-# The list comes from tracing which modules VLC loads for MP3, Ogg Opus,
-# WebM Opus, M4A (AAC), FLAC, MP4 and WAV, plus Windows audio outputs,
-# resamplers/channel mixers and AAC/ALAC/AC-3 fallbacks (avcodec).
-# To support another format, add its plugin here; the repo keeps the full set.
-VLC_PLUGINS = {
-    "access":        ["filesystem"],
-    "audio_output":  ["mmdevice", "wasapi", "directsound", "waveout", "adummy"],
-    "audio_mixer":   ["float_mixer", "integer_mixer"],
-    "audio_filter":  ["audio_format", "remap", "samplerate", "speex_resampler",
-                      "ugly_resampler", "scaletempo", "simple_channel_mixer",
-                      "trivial_channel_mixer", "headphone_channel_mixer"],
-    "codec":         ["mpg123", "opus", "flac", "faad", "avcodec", "araw", "vorbis"],
-    "demux":         ["es", "mp4", "ogg", "flacsys", "mkv", "wav"],
-    "packetizer":    ["packetizer_mpegaudio", "packetizer_mpeg4audio", "packetizer_flac",
-                      "packetizer_copy", "packetizer_a52"],
-    "stream_filter": ["cache_read", "cache_block", "prefetch", "record", "skiptags"],
-    "keystore":      ["memory_keystore"],
-    "logger":        ["console_logger", "file_logger"],
-}
+# Only the plugins needed to play local audio are bundled (no video, network,
+# discs, GUI, Lua...). The list comes from tracing which modules VLC loads for
+# MP3, Ogg Opus, WebM Opus, M4A (AAC), FLAC, MP4 and WAV, plus Windows audio
+# outputs, resamplers/channel mixers and AAC/ALAC/AC-3 fallbacks (avcodec).
+# The repo only keeps these files. To support another format, add its plugin
+# here and run tools\update_vlc.py again.
+import sys
+sys.path.insert(0, str(ROOT / "tools"))
+from vlc_files import vlc_files   # the list of shipped VLC files (one place)
 
-VLC_FILES = [
-    (str(ROOT / "libvlc.dll"), "."),
-    (str(ROOT / "libvlccore.dll"), "."),
-]
-for category, names in VLC_PLUGINS.items():
-    for name in names:
-        VLC_FILES.append((str(ROOT / "plugins" / category / f"lib{name}_plugin.dll"),
-                          f"plugins/{category}"))
+VLC_FILES = [(str(ROOT / rel), str(Path(rel).parent)) for rel in vlc_files()]
 
 for src, _ in VLC_FILES:
     if not Path(src).exists():
@@ -79,15 +65,22 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="silenceplayer",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    runtime_tmpdir=None,
     console=False,
-    icon=str(ROOT / "icon.png"),   # converted to .ico by PyInstaller (needs Pillow)
+    icon=str(ROOT / "icon.ico"),
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name="SilencePlayer",
 )

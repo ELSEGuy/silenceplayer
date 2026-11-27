@@ -80,6 +80,14 @@ class FakeMediaPlayer:
         with self.lock:
             return 1 if self.state == State.Playing else 0
 
+    def set_pause(self, on):
+        with self.lock:
+            if on and self.state == State.Playing:
+                self.state = State.Paused
+            elif not on and self.state == State.Paused:
+                self.state = State.Playing
+            self.events.append(("pause", bool(on)))
+
     def get_state(self):
         with self.lock:
             return self.state
@@ -208,7 +216,62 @@ except ImportError:
     sys.modules["tkinter.messagebox"] = tk_mod.messagebox
 
 
-import app as app_module  # noqa: E402
+import importlib  # noqa: E402
+import pkgutil  # noqa: E402
+
+import silenceplayer  # noqa: E402
+
+_MISSING = object()
+
+
+class _Package(types.ModuleType):
+    """One place for tests to reach everything in the silenceplayer package.
+
+    Reading appmod.X finds X in the module that has it. Setting appmod.X
+    (e.g. with monkeypatch.setattr) changes X in every module that has a
+    name X, so a test can swap a function or a constant no matter which
+    module uses it. (Each name means the same thing in every module.)
+    """
+
+    def __init__(self, modules):
+        super().__init__("appmod")
+        object.__setattr__(self, "_modules", modules)
+        for module in modules:
+            for name, value in vars(module).items():
+                if not name.startswith("__") and name not in self.__dict__:
+                    object.__setattr__(self, name, value)
+
+    def __setattr__(self, name, value):
+        for module in self._modules:
+            if name in vars(module):
+                setattr(module, name, value)
+        object.__setattr__(self, name, value)
+
+    def __getattribute__(self, name):
+        # Always read the live value: code may have changed a module variable.
+        if not name.startswith("_"):
+            for module in object.__getattribute__(self, "_modules"):
+                if name in vars(module):
+                    return vars(module)[name]
+        return object.__getattribute__(self, name)
+
+    @property
+    def all_source_code(self):
+        """Source code of every module (for tests that inspect the code)."""
+        import inspect
+        return "\n".join(inspect.getsource(m) for m in self._modules)
+
+
+def _all_modules():
+    names = ["silenceplayer"] + [m.name for m in pkgutil.walk_packages(
+        silenceplayer.__path__, "silenceplayer.") if not m.name.endswith("__main__")]
+    return [importlib.import_module(n) for n in names]
+
+
+app_module = _Package(_all_modules())
+
+# The real function, kept before the offline fixture below replaces it.
+REAL_FETCH_LATEST_RELEASE = app_module.fetch_latest_release
 
 
 # ── shared fixtures ──────────────────────────────────────────────────────────
@@ -258,6 +321,25 @@ def wait_until(predicate, timeout=3.0, interval=0.005):
 @pytest.fixture
 def appmod():
     return app_module
+
+
+@pytest.fixture(autouse=True)
+def _no_real_registry(monkeypatch):
+    """Tests must never change the real Start with Windows entry (CI runs on
+    Windows). Tests that need a registry patch in their own fake on top."""
+    def unavailable():
+        raise ImportError("registry disabled in tests")
+    monkeypatch.setattr(app_module, "_WinRegistry", unavailable)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_update_check(monkeypatch, tmp_path):
+    """Tests never contact GitHub or write the real update.json."""
+    def offline(timeout=10.0):
+        raise OSError("network disabled in tests")
+    monkeypatch.setattr(app_module, "fetch_latest_release", offline)
+    monkeypatch.setattr(app_module, "update_state_file", lambda: str(tmp_path / "update.json"))
+    monkeypatch.delenv(app_module.PRETEND_VERSION_ENV, raising=False)
 
 
 @pytest.fixture
@@ -312,3 +394,57 @@ def player_factory():
             p.stop(wait=True, timeout=3)
         except Exception:
             pass
+
+
+# ── Tk window fixtures (UI tests) ────────────────────────────────────────────
+
+# Every window a test creates stays referenced until the test run ends. Worker
+# threads (playback, monitor, Playing now) may outlive their test; if Python's
+# garbage collector then freed an old window on one of them, Tcl would abort
+# the whole run ("Tcl_AsyncDelete: async handler deleted by the wrong thread").
+_KEEP_ALIVE = []
+
+
+@pytest.fixture
+def root():
+    tk = pytest.importorskip("tkinter")
+    if not hasattr(tk, "Tk"):
+        pytest.skip("tkinter placeholder module")
+    try:
+        r = tk.Tk()
+    except tk.TclError as e:
+        pytest.skip(f"no display: {e}")
+    _KEEP_ALIVE.append(r)
+    yield r
+    try:
+        r.destroy()
+    except tk.TclError:
+        pass
+
+
+def fits_on_screen(root, height):
+    """False if the test screen is too short for a window this tall: Windows
+    caps a window at the screen's height (GitHub's test machine is 768 px)."""
+    return height <= root.winfo_screenheight() - 80
+
+
+def pump(root, seconds=0.2):
+    """Let Tk process events for a moment."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        root.update()
+        time.sleep(0.01)
+
+
+@pytest.fixture
+def cfg_path(appmod, tmp_path, monkeypatch):
+    path = tmp_path / "config.json"
+    monkeypatch.setattr(appmod, "CONFIG_FILE", str(path))
+    return path
+
+
+def make_app(appmod, root):
+    a = appmod.App(root)
+    _KEEP_ALIVE.append(a)
+    pump(root, 0.3)
+    return a

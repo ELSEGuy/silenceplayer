@@ -12,3 +12,4 @@ config.json.corrupt-*
 
 # Logs written next to app.py when running from source
 silenceplayer.log*
+.coverage
