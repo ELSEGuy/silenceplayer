@@ -1,6 +1,9 @@
 # Changelog
 
-## v1.4.1 (in progress)
+## v1.4.1
+
+Silence Player works exactly as in 1.4.0: this release tidies up the project
+behind it.
 
 ### For contributors
 - `tools/update_vlc.py` also writes the new VLC version into README.md,
