@@ -6,7 +6,7 @@ import tkinter.font as tkfont
 
 from PIL import Image, ImageTk
 
-from .rounded import photo, shape_image
+from .rounded import photo, shape_image, tk_colour
 
 
 class MarqueeLabel(tk.Canvas):
@@ -36,7 +36,7 @@ class MarqueeLabel(tk.Canvas):
         width = self._font.measure("0") * width_chars + 16
         height = self._font.metrics("linespace") + 14
         # radius > 0: a rounded field (continuous corners) on the parent's colour.
-        self._radius, self._outer = radius, parent.cget("bg")
+        self._radius, self._outer = radius, tk_colour(parent, parent.cget("bg"))
         super().__init__(parent, width=width, height=height,
                          bg=self._outer if radius else bg,
                          highlightthickness=0, bd=0, cursor="hand2" if on_click else "")

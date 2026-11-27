@@ -10,7 +10,7 @@ if not hasattr(tk, "Tk"):
     pytest.skip("tkinter placeholder module", allow_module_level=True)
 
 
-from conftest import make_app, pump  # noqa: E402
+from conftest import fits_on_screen, make_app, pump  # noqa: E402
 
 
 def test_first_run_keeps_settings_visible(appmod, root, cfg_path, fast_timing):
@@ -425,7 +425,9 @@ def test_every_tab_fits_one_height_and_tabs_never_resize(appmod, root, cfg_path,
     a.update_row.pack(fill="x", padx=10, pady=(8, 0), before=a.status_label)
     a._fit_window()
     pump(root, 0.1)
-    assert root.winfo_height() == height + a.update_row.winfo_reqheight() + a.BAR_GAP
+    grown = height + a.update_row.winfo_reqheight() + a.BAR_GAP
+    if fits_on_screen(root, grown):
+        assert root.winfo_height() == grown
     a.update_row.pack_forget()
     a._fit_window()
     pump(root, 0.1)

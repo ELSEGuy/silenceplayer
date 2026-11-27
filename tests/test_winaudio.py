@@ -56,7 +56,8 @@ class FakeWindows:
 
     def __init__(self, monkeypatch, devices):
         self.devices = devices
-        self.enumerations = 0
+        self.by_thread = {}      # thread id -> device listings made on that thread
+        self._test_thread = threading.get_ident()
         win = self
 
         class Collection:
@@ -68,7 +69,8 @@ class FakeWindows:
 
         class Enumerator:
             def EnumAudioEndpoints(self, flow, state):
-                win.enumerations += 1
+                tid = threading.get_ident()
+                win.by_thread[tid] = win.by_thread.get(tid, 0) + 1
                 return Collection()
 
         comtypes = types.ModuleType("comtypes")
@@ -92,6 +94,12 @@ class FakeWindows:
         monkeypatch.setattr(pycaw_mod, "IAudioSessionManager2",
                             types.SimpleNamespace(_iid_=object()), raising=False)
         monkeypatch.setattr(pycaw_mod, "IMMDeviceEnumerator", object(), raising=False)
+
+    @property
+    def enumerations(self):
+        """Listings made by the test itself. Background threads of apps from
+        earlier tests (on Windows) can call the fake too; they don't count."""
+        return self.by_thread.get(self._test_thread, 0)
 
 
 @pytest.fixture
@@ -146,7 +154,8 @@ def test_device_cache_is_per_thread(appmod, monkeypatch, fresh_cache):
     t = threading.Thread(target=appmod.list_sessions)
     t.start()
     t.join()
-    assert win.enumerations == 2                   # COM objects stay on their own thread
+    assert win.enumerations == 1                   # COM objects stay on their own thread:
+    assert win.by_thread[t.ident] == 1             # the other thread made its own list
 
 
 # ── process names ────────────────────────────────────────────────────────────

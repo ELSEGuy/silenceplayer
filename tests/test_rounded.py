@@ -361,3 +361,16 @@ def test_buttons_light_up_on_hover(root):
     b.event_generate("<Enter>")
     assert b.cget("image") == rest, "no hover on a disabled button"
     assert hover_colour(theme.SURFACE1) != theme.SURFACE1
+
+
+def test_tk_colour_names_pil_does_not_know_still_work(root):
+    # A plain tk.Tk() on Windows is "SystemButtonFace", which PIL can't read;
+    # "gray50" is such a name everywhere.
+    assert rounded.tk_colour(root, "gray50") == "#7f7f7f"
+    assert rounded.tk_colour(root, "#123456") == "#123456"
+    parent = tk.Frame(root, bg="gray50")
+    parent.pack()
+    card = tk.Frame(parent, bg="gray25", width=100, height=50)
+    card.pack(padx=10, pady=10)
+    rounded.round_corners(card, 14)          # used to raise "unknown color specifier"
+    assert len(card.round_corner_pieces) == 4

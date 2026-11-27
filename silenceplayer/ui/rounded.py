@@ -122,6 +122,18 @@ def shape_image(w, h, fill, outer=None, radius=0, kind="continuous"):
     return img.reduce(ss)
 
 
+def tk_colour(widget, colour):
+    """`colour` as #rrggbb. Tk also accepts names PIL doesn't know, like
+    Windows' "SystemButtonFace" (a plain tk.Tk()'s background)."""
+    if colour is None or (isinstance(colour, str) and colour.startswith("#")):
+        return colour
+    try:
+        r, g, b = widget.winfo_rgb(colour)
+    except tk.TclError:
+        return colour
+    return f"#{r >> 8:02x}{g >> 8:02x}{b >> 8:02x}"
+
+
 def _cache(widget):
     root = widget._root()
     cache = root.__dict__.get("_rounded_images")
@@ -135,6 +147,7 @@ def _cache(widget):
 def photo(widget, w, h, fill, outer=None, radius=0, kind="continuous"):
     """Tk image of shape_image(), cached per Tk interpreter."""
     root, cache = _cache(widget)
+    fill, outer = tk_colour(widget, fill), tk_colour(widget, outer)
     key = ("shape", int(w), int(h), fill, outer, radius, kind)
     img = cache.get(key)
     if img is None:
@@ -147,6 +160,7 @@ def corner_photo(widget, radius, fill, outer, corner):
     """One corner piece ('nw', 'ne', 'sw', 'se'): outer colour outside the
     curve, fill inside. Four of them round a rectangle of any size."""
     root, cache = _cache(widget)
+    fill, outer = tk_colour(widget, fill), tk_colour(widget, outer)
     key = ("corner", radius, fill, outer, corner)
     img = cache.get(key)
     if img is None:

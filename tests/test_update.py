@@ -178,7 +178,7 @@ def test_background_thread_checks_and_respects_the_switch(appmod, tmp_path, monk
 
 # ── in the app ───────────────────────────────────────────────────────────────
 
-from conftest import make_app, pump  # noqa: E402
+from conftest import fits_on_screen, make_app, pump  # noqa: E402
 
 
 @pytest.fixture
@@ -248,6 +248,8 @@ def test_switch_is_a_normal_setting(appmod, root, ui, cfg_path):
 
 def test_both_bars_fit_together(appmod, root, ui):
     a, opened = ui
+    if not fits_on_screen(root, a.WINDOW_H + 2 * 90):
+        pytest.skip("the test screen is too short for the window with both bars")
     a.on_suspected_mirror(["audioviz.exe"])
     pump(root, 0.1)
     h1 = a.root.winfo_height()

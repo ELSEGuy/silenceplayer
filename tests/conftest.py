@@ -422,6 +422,12 @@ def root():
         pass
 
 
+def fits_on_screen(root, height):
+    """False if the test screen is too short for a window this tall: Windows
+    caps a window at the screen's height (GitHub's test machine is 768 px)."""
+    return height <= root.winfo_screenheight() - 80
+
+
 def pump(root, seconds=0.2):
     """Let Tk process events for a moment."""
     end = time.monotonic() + seconds
