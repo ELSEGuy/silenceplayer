@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.4.1 (in progress)
+
+### For contributors
+- `tools/update_vlc.py` also writes the new VLC version into README.md,
+  requirements.txt and silenceplayer.spec, and a test checks that they agree
+  (requirements.txt still said 3.0.23).
+- The tests run on a PC without tkinter again, as the README says (the
+  window tests are skipped there).
+
 ## v1.4.0
 
 ### Added

@@ -143,12 +143,13 @@ The VLC engine is **not** downloaded during the build: the repo contains
 `libvlc.dll`, `libvlccore.dll` and the plugins Silence Player uses, from the official
 **VLC 3.0.24 (x64)** zip. To move to a newer VLC, run
 `python tools\update_vlc.py <version>`: it downloads the official zip, checks it
-against VideoLAN's published SHA-256, and replaces those files.
+against VideoLAN's published SHA-256, replaces those files and updates the version
+number in the docs.
 
 To run from source instead: `pip install -r requirements.txt`, then `python app.py`.
 Tests: `pip install -r requirements-dev.txt`, then `python -m pytest` (they use fakes
-for VLC and the Windows audio APIs, so they run anywhere). Check the code with
-`python -m ruff check .`.
+for VLC and the Windows audio APIs, so they run anywhere; without tkinter, the window
+tests are skipped). Check the code with `python -m ruff check .`.
 
 GitHub Actions runs the code check and the tests on every push, builds the installer
 and portable zip on every push to `master` or a `v*` branch, and turns a pushed tag

@@ -200,8 +200,9 @@ proctap_mod = types.ModuleType("proctap")
 proctap_mod.ProcessAudioCapture = _UnavailableCapture
 sys.modules["proctap"] = proctap_mod
 
-# tkinter isn't always installed on headless Linux; the App class isn't
-# exercised by these tests, so a placeholder module is enough to import app.py.
+# tkinter isn't always installed on headless Linux; the UI tests skip
+# themselves then, so a placeholder module is enough to import the package.
+# It needs every tkinter class the app subclasses at import time.
 try:
     import tkinter  # noqa: F401
 except ImportError:
@@ -209,7 +210,8 @@ except ImportError:
     tk_mod.filedialog = types.ModuleType("tkinter.filedialog")
     tk_mod.messagebox = types.ModuleType("tkinter.messagebox")
     tk_mod.font = types.ModuleType("tkinter.font")
-    tk_mod.Canvas = object
+    tk_mod.Canvas = type("Canvas", (), {})
+    tk_mod.Label = type("Label", (), {})
     sys.modules["tkinter"] = tk_mod
     sys.modules["tkinter.font"] = tk_mod.font
     sys.modules["tkinter.filedialog"] = tk_mod.filedialog

@@ -57,4 +57,6 @@ notice.
 
 Every few months VideoLAN releases a new VLC 3.0.x, often with security fixes.
 Run `python tools\update_vlc.py 3.0.25` (with the new version number) on your
-PC, then run the tests and play a few files before committing.
+PC, then run the tests and play a few files before committing. It also writes
+the new version into README.md, requirements.txt and silenceplayer.spec (a test checks that
+they all agree).
