@@ -1,8 +1,6 @@
 <p align="center">
-  <img src="icon.png" alt="Silence Player" width="160">
+  <img src="banner.png" alt="Silence Player" width="100%">
 </p>
-
-<h1 align="center">Silence Player</h1>
 
 <p align="center">
   <strong>Ambient audio that automatically fills the silence.</strong>
