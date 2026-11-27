@@ -41,7 +41,7 @@ jobs:
       - name: Build
         shell: pwsh
         run: ./build.ps1 -SkipTests -Installer
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: silenceplayer-build
           if-no-files-found: error
