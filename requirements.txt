@@ -5,8 +5,8 @@
 # change a pin, rebuild, and test playback, ducking and the Discord fix.
 
 # Audio session monitoring (pycaw needs comtypes + psutil)
-pycaw==20251023
-comtypes==1.4.15
+pycaw==20260927
+comtypes==1.5.0
 psutil==7.2.2
 
 # Playback. python-vlc is only the binding; the VLC engine itself is the
@@ -16,9 +16,9 @@ python-vlc==3.0.21203
 # System tray (pystray needs Pillow + six)
 pystray==0.19.5
 six==1.17.0
-pillow==12.1.1
+pillow==13.0.0
 
 # Discord Mirroring Fix: per-process capture (ships a native .pyd; needs scipy)
-proc-tap==1.0.3
-scipy==1.17.1
-numpy==2.4.2
+proc-tap==1.1.1
+scipy==1.18.1
+numpy==2.5.5
